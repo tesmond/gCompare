@@ -41,6 +41,14 @@ func (a *App) ChooseFile() (string, error) {
 	})
 }
 
+func (a *App) ChooseSaveFile(defaultFilename string) (string, error) {
+	return wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		Title:                "Save text",
+		DefaultFilename:      defaultFilename,
+		CanCreateDirectories: true,
+	})
+}
+
 func (a *App) HomeDirectory() (string, error) {
 	return os.UserHomeDir()
 }
@@ -65,8 +73,23 @@ func (a *App) OpenFileComparison(tabID string, leftPath string, rightPath string
 	return a.sessions.Open(tabID, leftPath, rightPath)
 }
 
+func (a *App) CompareText(leftText string, rightText string) compare.FileComparisonResult {
+	return compare.CompareText(leftText, rightText)
+}
+
+func (a *App) WriteTextFile(path string, text string) error {
+	if path == "" {
+		return fmt.Errorf("save path is required")
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
 func (a *App) RefreshFileComparison(tabID string) (compare.FileComparisonResult, error) {
 	return a.sessions.Refresh(tabID)
+}
+
+func (a *App) UpdateFileComparisonText(tabID string, side string, text string) (compare.FileComparisonResult, error) {
+	return a.sessions.ReplaceText(tabID, side, text)
 }
 
 func (a *App) ApplyLinesLeftToRight(tabID string, startRow int, endRow int) (compare.FileComparisonResult, error) {

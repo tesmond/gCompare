@@ -34,6 +34,30 @@ func TestOpenFileComparisonAlignsChangedAndMissingLines(t *testing.T) {
 	}
 }
 
+func TestReplaceTextMarksSideDirtyAndRebuildsDiff(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left.txt")
+	right := filepath.Join(root, "right.txt")
+	mustWrite(t, left, "one\n")
+	mustWrite(t, right, "one\n")
+
+	store := NewSessionStore()
+	if _, err := store.Open("tab", left, right); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.ReplaceText("tab", "left", "one\ntwo\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.LeftDirty || result.RightDirty {
+		t.Fatalf("dirty flags = left %v right %v", result.LeftDirty, result.RightDirty)
+	}
+	if got := result.Rows[len(result.Rows)-1].Status; got != LineLeftOnly {
+		t.Fatalf("last row status = %s, want %s", got, LineLeftOnly)
+	}
+}
+
 func TestApplyLinesLeftToRightEditsInMemoryAndMarksDirty(t *testing.T) {
 	root := t.TempDir()
 	left := filepath.Join(root, "left.txt")

@@ -174,6 +174,25 @@ func (s *SessionStore) Save(tabID string, side string) (FileComparisonResult, er
 	return session.result(), nil
 }
 
+func (s *SessionStore) ReplaceText(tabID string, side string, text string) (FileComparisonResult, error) {
+	session, err := s.get(tabID)
+	if err != nil {
+		return FileComparisonResult{}, err
+	}
+
+	switch side {
+	case "left":
+		session.left = splitLines([]byte(text))
+		session.leftDirty = true
+	case "right":
+		session.right = splitLines([]byte(text))
+		session.rightDirty = true
+	default:
+		return FileComparisonResult{}, fmt.Errorf("unknown side: %s", side)
+	}
+	return session.result(), nil
+}
+
 func (s *SessionStore) Discard(tabID string) (FileComparisonResult, error) {
 	session, err := s.get(tabID)
 	if err != nil {

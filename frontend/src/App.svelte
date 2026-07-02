@@ -1,5 +1,6 @@
 <script>
   import { tick } from 'svelte';
+  import DiffEditor from './DiffEditor.svelte';
 
   const appApi = () => window.go?.main?.App;
 
@@ -10,6 +11,8 @@
   let contextMenu = null;
   let contextMenuElement;
   let pendingClose = null;
+  let textCompareRequests = {};
+  let fileEditTimers = {};
   let shiftAnchor = null;
   let leftComparePane;
   let centerComparePane;
@@ -27,10 +30,22 @@
     loading: false,
     error: ''
   });
+  const emptyTextComparison = () => ({
+    left: '',
+    right: '',
+    leftPath: '',
+    rightPath: '',
+    leftSaved: '',
+    rightSaved: '',
+    result: null,
+    loading: false,
+    error: ''
+  });
   const emptySourceState = () => ({
     sourceLock: '',
     leftSource: null,
     rightSource: null,
+    textComparison: emptyTextComparison(),
     browsers: {
       left: emptyBrowser(),
       right: emptyBrowser()
@@ -79,11 +94,17 @@
     return 'New comparison';
   }
 
+  function textTitle(left, right) {
+    return left || right ? 'Text comparison' : 'New comparison';
+  }
+
   function tabDirty(tab) {
-    return tab?.mode === 'file' && Boolean(tab?.result?.leftDirty || tab?.result?.rightDirty);
+    if (tab?.mode === 'file') return Boolean(tab?.result?.leftDirty || tab?.result?.rightDirty);
+    return textComparisonDirty(tab);
   }
 
   function tabModeLabel(tab) {
+    if (tab?.mode === 'new' && hasTextComparison(tab)) return 'text';
     return tab?.mode === 'new' ? 'new' : tab?.mode || '';
   }
 
@@ -96,6 +117,8 @@
       id: newID(),
       mode: 'new',
       title: 'New comparison',
+      selectionStart: null,
+      selectionEnd: null,
       ...emptySourceState()
     };
     tabs = [...tabs, tab];
@@ -234,7 +257,7 @@
   }
 
   function requestClose(tab) {
-    if (tab.mode === 'file' && tabDirty(tab)) {
+    if (tabDirty(tab)) {
       pendingClose = tab;
       return;
     }
@@ -244,9 +267,18 @@
   async function closeWithSave() {
     if (!pendingClose) return;
     const tabID = pendingClose.id;
+    const tab = pendingClose;
     pendingClose = null;
     try {
-      await backend().SaveFileComparison(tabID, 'both');
+      if (tab.mode === 'new') {
+        const saved = await saveTextComparison(tabID, 'both', { closeAfter: true });
+        if (!saved) {
+          pendingClose = tab;
+          return;
+        }
+      } else {
+        await backend().SaveFileComparison(tabID, 'both');
+      }
       closeTab(tabID);
     } catch (err) {
       failActive(err);
@@ -338,6 +370,223 @@
     return canSelectTypeFor(activeTab, type);
   }
 
+  function canUseTextComparison(tab) {
+    return tab?.mode === 'new' && !tab.sourceLock && !tab.leftSource && !tab.rightSource;
+  }
+
+  function hasTextComparison(tab) {
+    const text = tab?.textComparison;
+    return Boolean(text?.left || text?.right || text?.result || text?.loading || text?.error);
+  }
+
+  function textSideDirty(tab, side) {
+    const text = tab?.textComparison;
+    if (!text) return false;
+    const value = text[side] || '';
+    const path = text[`${side}Path`] || '';
+    const saved = text[`${side}Saved`] || '';
+    return path ? value !== saved : value !== '';
+  }
+
+  function textComparisonDirty(tab) {
+    return tab?.mode === 'new' && (textSideDirty(tab, 'left') || textSideDirty(tab, 'right'));
+  }
+
+  function textSideNeedsSave(tab, side) {
+    const text = tab?.textComparison;
+    if (!text) return false;
+    return text[`${side}Path`] ? textSideDirty(tab, side) : hasTextComparison(tab);
+  }
+
+  function comparisonRows(tab) {
+    return tab?.result?.rows || tab?.textComparison?.result?.rows || [];
+  }
+
+  function updateTextSource(tabID, side, value) {
+    const tab = getTab(tabID);
+    if (!canUseTextComparison(tab)) return;
+    updateSourceTab(tabID, (current) => {
+      const nextText = { ...current.textComparison, [side]: value, error: '' };
+      const hasText = Boolean(nextText.left || nextText.right);
+      return {
+        title: textTitle(nextText.left, nextText.right),
+        selectionStart: null,
+        selectionEnd: null,
+        textComparison: {
+          ...nextText,
+          result: hasText ? nextText.result : null,
+          loading: hasText
+        }
+      };
+    });
+    runTextComparison(tabID);
+  }
+
+  async function runTextComparison(tabID) {
+    const tab = getTab(tabID);
+    if (!canUseTextComparison(tab)) return;
+
+    const left = tab.textComparison?.left || '';
+    const right = tab.textComparison?.right || '';
+    if (!left && !right) {
+      updateSourceTab(tabID, (current) => ({
+        textComparison: { ...current.textComparison, result: null, loading: false, error: '' }
+      }));
+      return;
+    }
+
+    const requestID = (textCompareRequests[tabID] || 0) + 1;
+    textCompareRequests = { ...textCompareRequests, [tabID]: requestID };
+    try {
+      const result = await backend().CompareText(left, right);
+      const current = getTab(tabID);
+      if (
+        textCompareRequests[tabID] !== requestID ||
+        !canUseTextComparison(current) ||
+        current.textComparison.left !== left ||
+        current.textComparison.right !== right
+      ) {
+        return;
+      }
+      updateSourceTab(tabID, (latest) => ({
+        textComparison: { ...latest.textComparison, result, loading: false, error: '' }
+      }));
+    } catch (err) {
+      if (textCompareRequests[tabID] !== requestID) return;
+      updateSourceTab(tabID, (current) => ({
+        textComparison: {
+          ...current.textComparison,
+          loading: false,
+          error: err?.message || String(err)
+        }
+      }));
+    }
+  }
+
+  function defaultTextFilename(side) {
+    return side === 'left' ? 'left.txt' : 'right.txt';
+  }
+
+  async function saveTextSide(tabID, side) {
+    const tab = getTab(tabID);
+    if (!canUseTextComparison(tab)) return false;
+    const text = tab.textComparison;
+    const value = text[side] || '';
+    let path = text[`${side}Path`] || '';
+    if (!path) {
+      path = await backend().ChooseSaveFile(defaultTextFilename(side));
+      if (!path) return false;
+    }
+
+    await backend().WriteTextFile(path, value);
+    updateSourceTab(tabID, (current) => ({
+      textComparison: {
+        ...current.textComparison,
+        [`${side}Path`]: path,
+        [`${side}Saved`]: value,
+        error: ''
+      }
+    }));
+    return true;
+  }
+
+  async function saveTextComparison(tabID, side = 'both', options = {}) {
+    const tab = getTab(tabID);
+    if (!canUseTextComparison(tab)) return false;
+    error = '';
+    try {
+      const sides = side === 'both' ? ['left', 'right'] : [side];
+      for (const nextSide of sides) {
+        const current = getTab(tabID);
+        if (textSideNeedsSave(current, nextSide)) {
+          const saved = await saveTextSide(tabID, nextSide);
+          if (!saved) return false;
+        }
+      }
+
+      const savedTab = getTab(tabID);
+      const leftPath = savedTab?.textComparison?.leftPath;
+      const rightPath = savedTab?.textComparison?.rightPath;
+      if (options.closeAfter) return true;
+      if (leftPath && rightPath && !textComparisonDirty(savedTab)) {
+        await openFileComparison({ left: leftPath, right: rightPath }, { tabID });
+      }
+      return true;
+    } catch (err) {
+      updateSourceTab(tabID, (current) => ({
+        textComparison: {
+          ...current.textComparison,
+          loading: false,
+          error: err?.message || String(err)
+        }
+      }));
+      return false;
+    }
+  }
+
+  function sideTextFromRows(result, side) {
+    const indexKey = side === 'left' ? 'leftIndex' : 'rightIndex';
+    const textKey = side === 'left' ? 'leftText' : 'rightText';
+    return (result?.rows || [])
+      .filter((row) => row[indexKey] !== undefined && row[indexKey] !== null)
+      .sort((a, b) => a[indexKey] - b[indexKey])
+      .map((row) => row[textKey] || '');
+  }
+
+  function sideTextValue(tab, side) {
+    if (tab?.mode === 'file') return sideTextFromRows(tab.result, side).join('\n');
+    if (tab?.mode === 'new') return tab.textComparison?.[side] || '';
+    return '';
+  }
+
+  function updateFileSideText(tabID, side, text) {
+    const key = `${tabID}:${side}`;
+    clearTimeout(fileEditTimers[key]);
+    fileEditTimers[key] = setTimeout(async () => {
+      try {
+        const result = await backend().UpdateFileComparisonText(tabID, side, text);
+        updateTab(tabID, { result });
+      } catch (err) {
+        failTab(tabID, err);
+      }
+    }, 150);
+  }
+
+  function updateEditorSource(tab, side, value) {
+    if (!tab) return;
+    if (tab.mode === 'new') {
+      updateTextSource(tab.id, side, value);
+    } else if (tab.mode === 'file') {
+      updateFileSideText(tab.id, side, value);
+    }
+  }
+
+  function selectEditorRange(tab, range) {
+    if (!tab || !range) return;
+    updateTab(tab.id, { selectionStart: range.start, selectionEnd: range.end });
+  }
+
+  function updateEditorViewport(viewport) {
+    mapScrollTop = viewport?.scrollTop || 0;
+    mapViewportHeight = viewport?.clientHeight || 0;
+  }
+
+  async function showEditorContext(tab, details) {
+    if (!tab || tab.mode !== 'file' || !details?.row) return;
+    contextMenu = {
+      x: details.x,
+      y: details.y,
+      tabID: tab.id,
+      mode: tab.mode,
+      side: details.side,
+      row: details.row,
+      rowIndex: details.rowIndex
+    };
+    updateTab(tab.id, { selectionStart: details.rowIndex, selectionEnd: details.rowIndex });
+    await tick();
+    fitContextMenuToViewport();
+  }
+
   function selectedSourcePatch(tab, side, path, type) {
     const nextSource = { path, type };
     let nextLeft = side === 'left' ? nextSource : tab.leftSource;
@@ -351,7 +600,8 @@
       leftSource: nextLeft,
       rightSource: nextRight,
       sourceLock: type,
-      title: sourceTitle(nextLeft, nextRight, type)
+      title: sourceTitle(nextLeft, nextRight, type),
+      textComparison: emptyTextComparison()
     };
   }
 
@@ -521,30 +771,6 @@
     }[type] || '';
   }
 
-  function lineSegments(row, side) {
-    const segments = side === 'left' ? row.leftSegments : row.rightSegments;
-    if (segments?.length) return segments;
-    const text = side === 'left' ? row.leftText : row.rightText;
-    return text ? [{ text, isDiffToken: row.status !== 'equal', changed: row.status !== 'equal' }] : [];
-  }
-
-  function segmentIsDiff(segment) {
-    return segment.isDiffToken ?? segment.changed;
-  }
-
-  function semanticState(row, side) {
-    const state = side === 'left' ? row.leftSemanticState : row.rightSemanticState;
-    if (state) return state;
-    if (row.status === 'left_only') return side === 'left' ? 'IMPORTANT_DIFF' : 'ORPHAN_GAP';
-    if (row.status === 'right_only') return side === 'right' ? 'IMPORTANT_DIFF' : 'ORPHAN_GAP';
-    if (row.status === 'equal') return 'MATCH';
-    return 'IMPORTANT_DIFF';
-  }
-
-  function semanticClass(row, side) {
-    return `semantic-${semanticState(row, side).toLowerCase()}`;
-  }
-
   function mapColor(row) {
     if (row.status === 'different' || row.status === 'left_only' || row.status === 'right_only' || row.status === 'type_mismatch' || row.status === 'error') return '#A00000';
     if (!row.leftSemanticState && !row.rightSemanticState) return '#FFFFFF';
@@ -555,7 +781,7 @@
   }
 
   function viewportWindowStyle(tab) {
-    const totalRows = tab?.result?.rows?.length || 0;
+    const totalRows = comparisonRows(tab).length;
     if (!totalRows || !mapViewportHeight) return 'top: 0%; height: 100%;';
     const visibleRows = mapViewportHeight / fileRowHeight;
     const top = Math.min(100, (mapScrollTop / fileRowHeight / totalRows) * 100);
@@ -564,7 +790,7 @@
   }
 
   function focusIndicatorStyle(tab) {
-    const totalRows = tab?.result?.rows?.length || 0;
+    const totalRows = comparisonRows(tab).length;
     if (!totalRows) return 'display: none;';
     const focusRow = tab?.mode === 'folder' ? tab.selectedRow : selectedFileRange(tab)?.start;
     if (focusRow === null || focusRow === undefined) return 'display: none;';
@@ -764,10 +990,16 @@
     }
   }
 
+  function preventDirtyExit(event) {
+    if (!tabs.some(tabDirty)) return;
+    event.preventDefault();
+    event.returnValue = '';
+  }
+
   createSourceTab();
 </script>
 
-<svelte:window on:click={hideContext} />
+<svelte:window on:beforeunload={preventDirtyExit} on:click={hideContext} />
 
 <main class="app-shell">
   <nav class="tab-bar" aria-label="Open tabs">
@@ -793,7 +1025,66 @@
       <button class="primary" on:click={createSourceTab}>New tab</button>
     </section>
   {:else if activeTab.mode === 'new'}
-    <section class="source-picker">
+    {#if canUseTextComparison(sourceTab)}
+      <section class="comparison text-comparison">
+        <div class="text-source-toolbar">
+          <div>
+            <button on:click={() => selectWithNativeDialog('left', 'folder')}>Choose left folder</button>
+            <button on:click={() => selectWithNativeDialog('left', 'file')}>Choose left file</button>
+          </div>
+          <div>
+            <button on:click={() => selectWithNativeDialog('right', 'folder')}>Choose right folder</button>
+            <button on:click={() => selectWithNativeDialog('right', 'file')}>Choose right file</button>
+          </div>
+        </div>
+        {#if sourceTab.textComparison.error}
+          <div class="error-banner">{sourceTab.textComparison.error}</div>
+        {/if}
+        <div class="editor-grid-header">
+          <div class="header-with-action">
+            <span title={sourceTab.textComparison.leftPath || 'Left text'}>
+              {sourceTab.textComparison.leftPath || 'Left text'} {textSideDirty(sourceTab, 'left') ? '•' : ''}
+            </span>
+            {#if textSideNeedsSave(sourceTab, 'left')}
+              <button class="icon-button" aria-label="Save left text" title="Save left text" on:click={() => saveTextComparison(sourceTab.id, 'left')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+              </button>
+            {/if}
+          </div>
+          <div class="header-with-action">
+            <span title={sourceTab.textComparison.rightPath || 'Right text'}>
+              {sourceTab.textComparison.rightPath || 'Right text'} {textSideDirty(sourceTab, 'right') ? '•' : ''}
+            </span>
+            {#if textSideNeedsSave(sourceTab, 'right')}
+              <button class="icon-button" aria-label="Save right text" title="Save right text" on:click={() => saveTextComparison(sourceTab.id, 'right')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+              </button>
+            {/if}
+          </div>
+        </div>
+        <div class="code-diff-body">
+          {#key sourceTab.id}
+            <DiffEditor
+              leftText={sourceTab.textComparison.left}
+              rightText={sourceTab.textComparison.right}
+              rows={comparisonRows(sourceTab)}
+              selectedRange={selectedFileRange(sourceTab)}
+              onChange={(side, value) => updateEditorSource(sourceTab, side, value)}
+              onSelectRange={(range) => selectEditorRange(sourceTab, range)}
+              onViewportChange={updateEditorViewport}
+            />
+          {/key}
+          <div class="diff-map-gutter" aria-label="Text difference overview">
+            {#each comparisonRows(sourceTab) as row}
+              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {/each}
+            <div class="diff-map-window" style={viewportWindowStyle(sourceTab)}></div>
+            <div class="diff-map-focus" style={focusIndicatorStyle(sourceTab)}></div>
+          </div>
+        </div>
+      </section>
+    {:else}
+    <section class:has-text-compare={hasTextComparison(sourceTab)} class="source-picker">
       <div class="browser-pair">
         <section class="browser-pane" aria-label="Left source browser">
           <div class="browser-top">
@@ -917,7 +1208,42 @@
           {/if}
         </section>
       </div>
+      {#if hasTextComparison(sourceTab)}
+        <section class="text-compare-preview" aria-label="Pasted text comparison">
+          {#if sourceTab.textComparison.error}
+            <div class="error-panel">{sourceTab.textComparison.error}</div>
+          {:else if sourceTab.textComparison.loading && !sourceTab.textComparison.result}
+            <div class="loading">Comparing…</div>
+          {:else if sourceTab.textComparison.result}
+            <div class="editor-grid-header">
+              <div>Left text</div>
+              <div>Right text</div>
+            </div>
+            <div class="code-diff-body">
+              {#key sourceTab.id}
+                <DiffEditor
+                  leftText={sourceTab.textComparison.left}
+                  rightText={sourceTab.textComparison.right}
+                  rows={comparisonRows(sourceTab)}
+                  selectedRange={selectedFileRange(sourceTab)}
+                  onChange={(side, value) => updateEditorSource(sourceTab, side, value)}
+                  onSelectRange={(range) => selectEditorRange(sourceTab, range)}
+                  onViewportChange={updateEditorViewport}
+                />
+              {/key}
+              <div class="diff-map-gutter" aria-label="Text difference overview">
+                {#each comparisonRows(sourceTab) as row}
+                  <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+                {/each}
+                <div class="diff-map-window" style={viewportWindowStyle(sourceTab)}></div>
+                <div class="diff-map-focus" style={focusIndicatorStyle(sourceTab)}></div>
+              </div>
+            </div>
+          {/if}
+        </section>
+      {/if}
     </section>
+    {/if}
   {:else}
     <section class="comparison">
       <div class="path-strip">
@@ -1007,66 +1333,39 @@
         {#if activeTab.result?.warning}
           <div class="warning-banner">{activeTab.result.warning}</div>
         {/if}
-        <div class="split-grid-header">
-          <div>Left file {activeTab.result?.leftDirty ? '•' : ''}</div>
-          <div>Status</div>
-          <div>Right file {activeTab.result?.rightDirty ? '•' : ''}</div>
-        </div>
-        <div class="file-compare-body">
-          <div class="split-rows">
-            <div class="split-pane side-pane file-side-pane" bind:this={leftComparePane} on:wheel={scrollComparisonFromSide}>
-              {#each activeTab.result?.rows || [] as row, index}
-                <div
-                  role="button"
-                  tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
-                  class={`compare-side-row line-cell status-${row.status} ${semanticClass(row, 'left')}`}
-                  on:click={(event) => selectFileRow(activeTab, index, event)}
-                  on:keydown={(event) => keySelectFile(event, activeTab, index)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index)}
-                >
-                  <span class="line-number">{row.leftLineNumber || ''}</span>
-                  <code>{#each lineSegments(row, 'left') as segment}<span class:diff-token={segmentIsDiff(segment)}>{segment.text}</span>{/each}</code>
-                </div>
-              {/each}
-            </div>
-            <div class="split-pane center-scroll-pane file-center-pane" bind:this={centerComparePane} on:scroll={syncComparisonScroll}>
-              {#each activeTab.result?.rows || [] as row, index}
-                <div
-                  role="button"
-                  tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
-                  class={`compare-status-row status-${row.status} semantic-${(row.semanticState || 'MATCH').toLowerCase()}`}
-                  on:click={(event) => selectFileRow(activeTab, index, event)}
-                  on:keydown={(event) => keySelectFile(event, activeTab, index)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index)}
-                >
-                  {indicator(row.status)}
-                </div>
-              {/each}
-            </div>
-            <div class="split-pane side-pane file-side-pane" bind:this={rightComparePane} on:wheel={scrollComparisonFromSide}>
-              {#each activeTab.result?.rows || [] as row, index}
-                <div
-                  role="button"
-                  tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
-                  class={`compare-side-row line-cell status-${row.status} ${semanticClass(row, 'right')}`}
-                  on:click={(event) => selectFileRow(activeTab, index, event)}
-                  on:keydown={(event) => keySelectFile(event, activeTab, index)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index)}
-                >
-                  <span class="line-number">{row.rightLineNumber || ''}</span>
-                  <code>{#each lineSegments(row, 'right') as segment}<span class:diff-token={segmentIsDiff(segment)}>{segment.text}</span>{/each}</code>
-                </div>
-              {/each}
-            </div>
+        <div class="editor-grid-header">
+          <div class="header-with-action">
+            <span title={activeTab.leftPath}>Left file {activeTab.result?.leftDirty ? '•' : ''}</span>
+            {#if activeTab.result?.leftDirty}
+              <button class="icon-button" aria-label="Save left file" title="Save left file" on:click={() => saveActive('left')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+              </button>
+            {/if}
           </div>
+          <div class="header-with-action">
+            <span title={activeTab.rightPath}>Right file {activeTab.result?.rightDirty ? '•' : ''}</span>
+            {#if activeTab.result?.rightDirty}
+              <button class="icon-button" aria-label="Save right file" title="Save right file" on:click={() => saveActive('right')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+              </button>
+            {/if}
+          </div>
+        </div>
+        <div class="code-diff-body">
+          {#key activeTab.id}
+            <DiffEditor
+              leftText={sideTextValue(activeTab, 'left')}
+              rightText={sideTextValue(activeTab, 'right')}
+              rows={comparisonRows(activeTab)}
+              selectedRange={selectedFileRange(activeTab)}
+              onChange={(side, value) => updateEditorSource(activeTab, side, value)}
+              onSelectRange={(range) => selectEditorRange(activeTab, range)}
+              onContextMenu={(details) => showEditorContext(activeTab, details)}
+              onViewportChange={updateEditorViewport}
+            />
+          {/key}
           <div class="diff-map-gutter" aria-label="Difference overview">
-            {#each activeTab.result?.rows || [] as row}
+            {#each comparisonRows(activeTab) as row}
               <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
             {/each}
             <div class="diff-map-window" style={viewportWindowStyle(activeTab)}></div>

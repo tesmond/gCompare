@@ -18,12 +18,20 @@ export function ChooseFile() {
   return window['go']['main']['App']['ChooseFile']();
 }
 
+export function ChooseSaveFile(arg1) {
+  return window['go']['main']['App']['ChooseSaveFile'](arg1);
+}
+
 export function CloseFileComparison(arg1) {
   return window['go']['main']['App']['CloseFileComparison'](arg1);
 }
 
 export function CloseFolderComparison(arg1) {
   return window['go']['main']['App']['CloseFolderComparison'](arg1);
+}
+
+export function CompareText(arg1, arg2) {
+  return window['go']['main']['App']['CompareText'](arg1, arg2);
 }
 
 export function CopyFileLeftToRight(arg1, arg2, arg3) {
@@ -72,4 +80,12 @@ export function RevealPath(arg1) {
 
 export function SaveFileComparison(arg1, arg2) {
   return window['go']['main']['App']['SaveFileComparison'](arg1, arg2);
+}
+
+export function UpdateFileComparisonText(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UpdateFileComparisonText'](arg1, arg2, arg3);
+}
+
+export function WriteTextFile(arg1, arg2) {
+  return window['go']['main']['App']['WriteTextFile'](arg1, arg2);
 }

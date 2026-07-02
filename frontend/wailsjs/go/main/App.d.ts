@@ -10,9 +10,13 @@ export function ChooseDirectory():Promise<string>;
 
 export function ChooseFile():Promise<string>;
 
+export function ChooseSaveFile(arg1:string):Promise<string>;
+
 export function CloseFileComparison(arg1:string):Promise<void>;
 
 export function CloseFolderComparison(arg1:string):Promise<void>;
+
+export function CompareText(arg1:string,arg2:string):Promise<compare.FileComparisonResult>;
 
 export function CopyFileLeftToRight(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
@@ -37,3 +41,7 @@ export function RefreshFolderComparison(arg1:string,arg2:string,arg3:string):Pro
 export function RevealPath(arg1:string):Promise<void>;
 
 export function SaveFileComparison(arg1:string,arg2:string):Promise<compare.FileComparisonResult>;
+
+export function UpdateFileComparisonText(arg1:string,arg2:string,arg3:string):Promise<compare.FileComparisonResult>;
+
+export function WriteTextFile(arg1:string,arg2:string):Promise<void>;

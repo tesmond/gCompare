@@ -350,14 +350,26 @@ button:disabled {
   align-items: center;
   border: 0;
   background: transparent;
-  display: grid;
-  gap: 10px;
-  grid-template-columns: 48px minmax(0, 1fr);
+  display: flex;
+  gap: 6px;
   min-width: 0;
   text-align: left;
 }
 
-.entry-main span:last-child {
+.browser-tree-entry .entry-main {
+  min-height: 26px;
+  padding-left: 0;
+}
+
+.browser-tree-entry .entry-name {
+  min-width: 0;
+}
+
+.browser-tree-entry .entry-type {
+  margin-left: auto;
+}
+
+.entry-main .entry-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -648,8 +660,7 @@ button:disabled {
   display: inline-block;
 }
 
-.folder-icon,
-.entry-icon-spacer {
+.folder-icon {
   flex: 0 0 16px;
   width: 16px;
 }
@@ -673,10 +684,6 @@ button:disabled {
   position: absolute;
   top: -5px;
   width: 8px;
-}
-
-.entry-icon-spacer {
-  display: inline-block;
 }
 
 .folder-side-pane .compare-side-row.status-pending {

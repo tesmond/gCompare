@@ -28,6 +28,9 @@
     path: '',
     parent: '',
     entries: [],
+    expanded: {},
+    loadedFolders: {},
+    loadingFolders: {},
     lines: [],
     warning: '',
     loading: false,
@@ -336,6 +339,16 @@
     return tab?.mode === 'new' && (type === 'file' || type === 'folder') && (!tab.sourceLock || tab.sourceLock === type);
   }
 
+  function browserTreeEntries(entries, parentID = '', depth = 0) {
+    return (entries || []).map((entry) => ({
+      ...entry,
+      id: entry.path,
+      parentID,
+      depth,
+      hasChildren: entry.type === 'folder'
+    }));
+  }
+
   async function loadBrowser(side, path, tabID = activeTabID) {
     const tab = getTab(tabID);
     if (tab?.mode !== 'new') return;
@@ -354,7 +367,10 @@
             mode: 'folder',
             path: listing.path,
             parent: listing.parent,
-            entries: listing.entries || [],
+            entries: browserTreeEntries(listing.entries || []),
+            expanded: {},
+            loadedFolders: {},
+            loadingFolders: {},
             lines: [],
             warning: '',
             loading: false,
@@ -724,9 +740,112 @@
 
   async function openBrowserEntry(side, entry) {
     if (entry.type === 'folder') {
-      await loadBrowser(side, entry.path);
+      await toggleBrowserFolder(side, entry);
     } else if (entry.type === 'file') {
       await selectFileSource(side, entry.path);
+    }
+  }
+
+  function browserEntryExpanded(browser, entry) {
+    return Boolean(browser?.expanded?.[entry.id]);
+  }
+
+  function browserIndent(entry) {
+    return `${Math.max(0, entry.depth || 0) * 18}px`;
+  }
+
+  function visibleBrowserEntries(browser) {
+    const expanded = browser?.expanded || {};
+    const visibleByID = {};
+    const visible = [];
+    for (const entry of browser?.entries || []) {
+      const parentVisible = !entry.parentID || (visibleByID[entry.parentID] && expanded[entry.parentID]);
+      visibleByID[entry.id] = parentVisible;
+      if (parentVisible) visible.push(entry);
+    }
+    return visible;
+  }
+
+  function descendantEndIndex(entries, entry) {
+    const start = entries.findIndex((item) => item.id === entry.id);
+    if (start === -1) return entries.length - 1;
+    let end = start;
+    for (let index = start + 1; index < entries.length; index++) {
+      if ((entries[index].depth || 0) <= (entry.depth || 0)) break;
+      end = index;
+    }
+    return end;
+  }
+
+  async function toggleBrowserFolder(side, entry) {
+    if (entry.type !== 'folder') return;
+    const tabID = activeTabID;
+    const tab = getTab(tabID);
+    if (tab?.mode !== 'new') return;
+    const browser = tab.browsers?.[side];
+    const nextExpanded = !browserEntryExpanded(browser, entry);
+    updateSourceTab(tabID, (current) => ({
+      browsers: {
+        ...current.browsers,
+        [side]: {
+          ...current.browsers[side],
+          expanded: { ...(current.browsers[side].expanded || {}), [entry.id]: nextExpanded }
+        }
+      }
+    }));
+    if (!nextExpanded || browser?.loadedFolders?.[entry.id] || browser?.loadingFolders?.[entry.id]) return;
+
+    updateSourceTab(tabID, (current) => ({
+      browsers: {
+        ...current.browsers,
+        [side]: {
+          ...current.browsers[side],
+          loadingFolders: { ...(current.browsers[side].loadingFolders || {}), [entry.id]: true }
+        }
+      }
+    }));
+    try {
+      const listing = await backend().ListDirectory(entry.path);
+      updateSourceTab(tabID, (current) => {
+        const browser = current.browsers[side];
+        if (browser.loadedFolders?.[entry.id]) {
+          return {
+            browsers: {
+              ...current.browsers,
+              [side]: {
+                ...browser,
+                loadingFolders: { ...(browser.loadingFolders || {}), [entry.id]: false }
+              }
+            }
+          };
+        }
+        const childEntries = browserTreeEntries(listing.entries || [], entry.id, (entry.depth || 0) + 1);
+        const insertAt = descendantEndIndex(browser.entries || [], entry) + 1;
+        const nextEntries = [...(browser.entries || [])];
+        nextEntries.splice(insertAt, 0, ...childEntries);
+        return {
+          browsers: {
+            ...current.browsers,
+            [side]: {
+              ...browser,
+              entries: nextEntries,
+              loadedFolders: { ...(browser.loadedFolders || {}), [entry.id]: true },
+              loadingFolders: { ...(browser.loadingFolders || {}), [entry.id]: false }
+            }
+          }
+        };
+      });
+    } catch (err) {
+      updateSourceTab(tabID, (current) => ({
+        browsers: {
+          ...current.browsers,
+          [side]: {
+            ...current.browsers[side],
+            loadingFolders: { ...(current.browsers[side].loadingFolders || {}), [entry.id]: false },
+            error: err?.message || String(err)
+          }
+        }
+      }));
     }
   }
 
@@ -1306,19 +1425,27 @@
             </div>
           {:else}
             <div class="browser-list">
-              {#each browsers.left.entries as entry}
+              {#each visibleBrowserEntries(browsers.left) as entry}
                 <div
                   class:selected-entry={leftSource?.path === entry.path}
                   class:locked-entry={!canSelectType(entry.type)}
-                  class="browser-entry"
+                  class="browser-entry browser-tree-entry"
                 >
                   <button
                     class="entry-main"
                     on:click={() => openBrowserEntry('left', entry)}
-                    on:dblclick={() => entry.type === 'folder' && loadBrowser('left', entry.path)}
                   >
+                    <span class="tree-spacer" style={`width: ${browserIndent(entry)}`}></span>
+                    {#if entry.type === 'folder'}
+                      <span class="tree-toggle" aria-hidden="true">
+                        {browserEntryExpanded(browsers.left, entry) ? '▾' : '▸'}
+                      </span>
+                      <span class="folder-icon" aria-hidden="true"></span>
+                    {:else}
+                      <span class="tree-toggle-spacer"></span>
+                    {/if}
+                    <span class="entry-name" title={entry.path}>{entry.name}</span>
                     <span class="entry-type">{typeLabel(entry.type)}</span>
-                    <span>{entry.name}</span>
                   </button>
                   <button
                     on:click={() => entry.type === 'folder' ? selectFolderSource('left', entry.path) : selectFileSource('left', entry.path)}
@@ -1367,19 +1494,27 @@
             </div>
           {:else}
             <div class="browser-list">
-              {#each browsers.right.entries as entry}
+              {#each visibleBrowserEntries(browsers.right) as entry}
                 <div
                   class:selected-entry={rightSource?.path === entry.path}
                   class:locked-entry={!canSelectType(entry.type)}
-                  class="browser-entry"
+                  class="browser-entry browser-tree-entry"
                 >
                   <button
                     class="entry-main"
                     on:click={() => openBrowserEntry('right', entry)}
-                    on:dblclick={() => entry.type === 'folder' && loadBrowser('right', entry.path)}
                   >
+                    <span class="tree-spacer" style={`width: ${browserIndent(entry)}`}></span>
+                    {#if entry.type === 'folder'}
+                      <span class="tree-toggle" aria-hidden="true">
+                        {browserEntryExpanded(browsers.right, entry) ? '▾' : '▸'}
+                      </span>
+                      <span class="folder-icon" aria-hidden="true"></span>
+                    {:else}
+                      <span class="tree-toggle-spacer"></span>
+                    {/if}
+                    <span class="entry-name" title={entry.path}>{entry.name}</span>
                     <span class="entry-type">{typeLabel(entry.type)}</span>
-                    <span>{entry.name}</span>
                   </button>
                   <button
                     on:click={() => entry.type === 'folder' ? selectFolderSource('right', entry.path) : selectFileSource('right', entry.path)}
@@ -1482,8 +1617,6 @@
                     {/if}
                     {#if sideIsFolder(row, 'left')}
                       <span class="folder-icon" aria-hidden="true"></span>
-                    {:else}
-                      <span class="entry-icon-spacer"></span>
                     {/if}
                     <span class="entry-name" title={nodePath(row, 'left')}>{row.name}</span>
                     <span class="entry-type">{typeLabel(nodeType(row, 'left'))}</span>
@@ -1516,7 +1649,7 @@
                   class:selected={rowSelected(activeTab, row.rowIndex)}
                   class:odd-row={row.rowIndex % 2 === 1}
                   class={`compare-side-row folder-cell status-${row.status}`}
-                  on:click={() => selectFolderRow(activeTab, row.rowIndex)}
+                  on:click={(event) => clickFolderSideRow(activeTab, row, event)}
                   on:keydown={(event) => keySelectFolder(event, activeTab, row.rowIndex, row)}
                   on:dblclick={() => openFolderFile(row)}
                   on:contextmenu={(event) => showContext(event, activeTab, row, row.rowIndex, 'right')}
@@ -1532,8 +1665,6 @@
                     {/if}
                     {#if sideIsFolder(row, 'right')}
                       <span class="folder-icon" aria-hidden="true"></span>
-                    {:else}
-                      <span class="entry-icon-spacer"></span>
                     {/if}
                     <span class="entry-name" title={nodePath(row, 'right')}>{row.name}</span>
                     <span class="entry-type">{typeLabel(nodeType(row, 'right'))}</span>

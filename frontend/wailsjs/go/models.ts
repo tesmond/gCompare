@@ -186,6 +186,11 @@ export namespace compare {
 	    }
 	}
 	export class FolderComparisonRow {
+	    id: string;
+	    parentID?: string;
+	    rowIndex: number;
+	    depth: number;
+	    hasChildren: boolean;
 	    name: string;
 	    leftPath: string;
 	    rightPath: string;
@@ -203,6 +208,11 @@ export namespace compare {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.parentID = source["parentID"];
+	        this.rowIndex = source["rowIndex"];
+	        this.depth = source["depth"];
+	        this.hasChildren = source["hasChildren"];
 	        this.name = source["name"];
 	        this.leftPath = source["leftPath"];
 	        this.rightPath = source["rightPath"];

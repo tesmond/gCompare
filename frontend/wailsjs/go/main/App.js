@@ -46,6 +46,10 @@ export function DiscardFileChanges(arg1) {
   return window['go']['main']['App']['DiscardFileChanges'](arg1);
 }
 
+export function ExpandFolderComparisonNode(arg1, arg2) {
+  return window['go']['main']['App']['ExpandFolderComparisonNode'](arg1, arg2);
+}
+
 export function HomeDirectory() {
   return window['go']['main']['App']['HomeDirectory']();
 }

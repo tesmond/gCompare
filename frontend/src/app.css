@@ -469,13 +469,32 @@ button:disabled {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .header-with-action span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.difference-nav {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.difference-count {
+  color: #526174;
+  font-size: 12px;
+  font-weight: 600;
+  max-width: 116px;
+}
+
+.difference-nav .icon-button {
+  min-height: 24px;
+  width: 26px;
 }
 
 .icon-button {
@@ -587,7 +606,7 @@ button:disabled {
 }
 
 .folder-cell {
-  gap: 8px;
+  gap: 6px;
 }
 
 .folder-side-pane {
@@ -597,6 +616,72 @@ button:disabled {
 
 .folder-side-pane .compare-side-row {
   border-bottom-color: #eeeeee;
+}
+
+.tree-spacer {
+  flex: 0 0 auto;
+  height: 1px;
+}
+
+.tree-toggle,
+.tree-toggle-spacer {
+  flex: 0 0 18px;
+  width: 18px;
+}
+
+.tree-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #526174;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 20px;
+  padding: 0;
+}
+
+.tree-toggle:hover:not(:disabled) {
+  background: #e8eef5;
+}
+
+.tree-toggle-spacer {
+  display: inline-block;
+}
+
+.folder-icon,
+.entry-icon-spacer {
+  flex: 0 0 16px;
+  width: 16px;
+}
+
+.folder-icon {
+  background: #e8b83f;
+  border: 1px solid #b98618;
+  border-radius: 2px;
+  height: 12px;
+  position: relative;
+}
+
+.folder-icon::before {
+  background: #f1cc66;
+  border: 1px solid #b98618;
+  border-bottom: 0;
+  border-radius: 2px 2px 0 0;
+  content: "";
+  height: 4px;
+  left: 1px;
+  position: absolute;
+  top: -5px;
+  width: 8px;
+}
+
+.entry-icon-spacer {
+  display: inline-block;
+}
+
+.folder-side-pane .compare-side-row.status-pending {
+  background: #f8fafc;
+  color: #526174;
 }
 
 .folder-side-pane .compare-side-row.status-equal {
@@ -643,6 +728,11 @@ button:disabled {
 .folder-center-pane .compare-status-row.status-equal {
   background: var(--color-bg-match);
   color: #888888;
+}
+
+.folder-center-pane .compare-status-row.status-pending {
+  background: #f8fafc;
+  color: #7c8796;
 }
 
 .folder-center-pane .compare-status-row.status-equal.odd-row {

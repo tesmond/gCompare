@@ -24,6 +24,8 @@ export function CopyFileRightToLeft(arg1:string,arg2:string,arg3:boolean):Promis
 
 export function DiscardFileChanges(arg1:string):Promise<compare.FileComparisonResult>;
 
+export function ExpandFolderComparisonNode(arg1:string,arg2:string):Promise<compare.FolderComparisonResult>;
+
 export function HomeDirectory():Promise<string>;
 
 export function ListDirectory(arg1:string):Promise<compare.DirectoryListing>;

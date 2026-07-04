@@ -1,5 +1,6 @@
 <script>
-  import { tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { EventsOn } from '../wailsjs/runtime/runtime';
   import DiffEditor from './DiffEditor.svelte';
 
   const appApi = () => window.go?.main?.App;
@@ -17,8 +18,10 @@
   let leftComparePane;
   let centerComparePane;
   let rightComparePane;
+  let diffEditor;
   let mapScrollTop = 0;
   let mapViewportHeight = 0;
+  let unsubscribeFolderUpdates = null;
   const fileRowHeight = 28;
   const emptyBrowser = () => ({
     mode: 'empty',
@@ -161,7 +164,10 @@
         result: null,
         loading: true,
         error: '',
-        selectedRow: null
+        selectedRow: null,
+        expanded: {},
+        loadedFolders: {},
+        loadingFolders: {}
       };
       if (options.tabID) {
         updateTab(tab.id, tab);
@@ -305,7 +311,11 @@
   }
 
   function updateTab(tabID, patch) {
-    tabs = tabs.map((tab) => (tab.id === tabID ? { ...tab, ...patch } : tab));
+    tabs = tabs.map((tab) => {
+      if (tab.id !== tabID) return tab;
+      const nextPatch = typeof patch === 'function' ? patch(tab) : patch;
+      return { ...tab, ...nextPatch };
+    });
   }
 
   function failActive(err) {
@@ -400,6 +410,46 @@
 
   function comparisonRows(tab) {
     return tab?.result?.rows || tab?.textComparison?.result?.rows || [];
+  }
+
+  function rowIsDifference(row) {
+    if (!row) return false;
+    if (row.status && row.status !== 'equal') return true;
+    return [row.semanticState, row.leftSemanticState, row.rightSemanticState].some(
+      (state) => state === 'IMPORTANT_DIFF' || state === 'UNIMPORTANT_DIFF' || state === 'ORPHAN_GAP'
+    );
+  }
+
+  function differenceGroups(tab) {
+    const groups = [];
+    let current = null;
+    const rows = comparisonRows(tab);
+    for (let index = 0; index < rows.length; index++) {
+      if (!rowIsDifference(rows[index])) {
+        current = null;
+        continue;
+      }
+      if (!current) {
+        current = { start: index, end: index };
+        groups.push(current);
+      } else {
+        current.end = index;
+      }
+    }
+    return groups;
+  }
+
+  function differenceCount(tab) {
+    return differenceGroups(tab).length;
+  }
+
+  function differenceLabel(tab) {
+    const count = differenceCount(tab);
+    return `${count} difference${count === 1 ? '' : 's'}`;
+  }
+
+  function navigateDifference(direction) {
+    diffEditor?.goToDifference(direction);
   }
 
   function updateTextSource(tabID, side, value) {
@@ -751,6 +801,7 @@
 
   function indicator(status) {
     return {
+      pending: '⌛',
       equal: '=',
       different: '≠',
       changed: '≠',
@@ -762,6 +813,20 @@
     }[status] || '';
   }
 
+  function statusLabel(status) {
+    return {
+      pending: 'Pending',
+      equal: 'Equal',
+      different: 'Different',
+      changed: 'Different',
+      left_only: 'Left only',
+      right_only: 'Right only',
+      type_mismatch: 'Type mismatch',
+      error: 'Error',
+      unknown: 'Unknown'
+    }[status] || status || '';
+  }
+
   function typeLabel(type) {
     return {
       file: 'file',
@@ -771,7 +836,101 @@
     }[type] || '';
   }
 
+  function nodeType(row, side) {
+    return side === 'left' ? row.leftType : row.rightType;
+  }
+
+  function nodeExists(row, side) {
+    return side === 'left' ? row.leftExists : row.rightExists;
+  }
+
+  function nodePath(row, side) {
+    return side === 'left' ? row.leftPath : row.rightPath;
+  }
+
+  function rowIsFolder(row) {
+    return row?.leftType === 'folder' || row?.rightType === 'folder';
+  }
+
+  function sideIsFolder(row, side) {
+    return nodeType(row, side) === 'folder';
+  }
+
+  function folderRowExpanded(tab, row) {
+    return Boolean(tab?.expanded?.[row.id]);
+  }
+
+  function visibleFolderRows(tab) {
+    const rows = comparisonRows(tab);
+    const expanded = tab?.expanded || {};
+    const visibleByID = {};
+    const visible = [];
+    for (const row of rows) {
+      const parentVisible = !row.parentID || (visibleByID[row.parentID] && expanded[row.parentID]);
+      visibleByID[row.id] = parentVisible;
+      if (parentVisible) visible.push(row);
+    }
+    return visible;
+  }
+
+  function folderIndent(row) {
+    return `${Math.max(0, row.depth || 0) * 18}px`;
+  }
+
+  async function toggleFolderNode(tab, row, event) {
+    event?.stopPropagation();
+    if (!rowIsFolder(row)) return;
+    const nextExpanded = !folderRowExpanded(tab, row);
+    updateTab(tab.id, (current) => ({
+      expanded: {
+        ...(current.expanded || {}),
+        [row.id]: nextExpanded
+      }
+    }));
+    if (!nextExpanded || tab.loadedFolders?.[row.id] || tab.loadingFolders?.[row.id]) return;
+
+    updateTab(tab.id, (current) => ({
+      loadingFolders: { ...(current.loadingFolders || {}), [row.id]: true }
+    }));
+    try {
+      const result = await backend().ExpandFolderComparisonNode(tab.id, row.id);
+      updateTab(tab.id, (current) => ({
+        result,
+        loadedFolders: { ...(current.loadedFolders || {}), [row.id]: true },
+        loadingFolders: { ...(current.loadingFolders || {}), [row.id]: false }
+      }));
+    } catch (err) {
+      updateTab(tab.id, (current) => ({
+        loadingFolders: { ...(current.loadingFolders || {}), [row.id]: false }
+      }));
+      failTab(tab.id, err);
+    }
+  }
+
+  function clickFolderSideRow(tab, row, event) {
+    selectFolderRow(tab, row.rowIndex);
+    if (rowIsFolder(row)) {
+      toggleFolderNode(tab, row, event);
+    }
+  }
+
+  function updateFolderNode(update) {
+    if (!update?.tabID || !update.nodeID) return;
+    updateTab(update.tabID, (tab) => {
+      if (tab.mode !== 'folder' || !tab.result?.rows) return {};
+      return {
+        result: {
+          ...tab.result,
+          rows: tab.result.rows.map((row) =>
+            row.id === update.nodeID ? { ...row, status: update.status, error: update.error || '' } : row
+          )
+        }
+      };
+    });
+  }
+
   function mapColor(row) {
+    if (row.status === 'pending') return '#999999';
     if (row.status === 'different' || row.status === 'left_only' || row.status === 'right_only' || row.status === 'type_mismatch' || row.status === 'error') return '#A00000';
     if (!row.leftSemanticState && !row.rightSemanticState) return '#FFFFFF';
     if (row.leftSemanticState === 'IMPORTANT_DIFF' || row.rightSemanticState === 'IMPORTANT_DIFF') return '#A00000';
@@ -846,6 +1005,10 @@
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       selectFolderRow(tab, rowIndex);
+      if (rowIsFolder(row)) {
+        toggleFolderNode(tab, row, event);
+        return;
+      }
     }
     if (event.key === 'Enter' && canOpenFolderFile(row)) {
       openFolderFile(row);
@@ -996,6 +1159,16 @@
     event.returnValue = '';
   }
 
+  onMount(() => {
+    unsubscribeFolderUpdates = EventsOn('folder-comparison:update', updateFolderNode);
+  });
+
+  onDestroy(() => {
+    if (typeof unsubscribeFolderUpdates === 'function') {
+      unsubscribeFolderUpdates();
+    }
+  });
+
   createSourceTab();
 </script>
 
@@ -1055,6 +1228,15 @@
             <span title={sourceTab.textComparison.rightPath || 'Right text'}>
               {sourceTab.textComparison.rightPath || 'Right text'} {textSideDirty(sourceTab, 'right') ? '•' : ''}
             </span>
+            <div class="difference-nav" aria-label="Difference navigation">
+              <span class="difference-count" title={differenceLabel(sourceTab)}>{differenceLabel(sourceTab)}</span>
+              <button class="icon-button" aria-label="Previous difference" title="Previous difference" disabled={!differenceCount(sourceTab)} on:click={() => navigateDifference('previous')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 5 12h4v7h6v-7h4L12 5Z"/></svg>
+              </button>
+              <button class="icon-button" aria-label="Next difference" title="Next difference" disabled={!differenceCount(sourceTab)} on:click={() => navigateDifference('next')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19 5 12h4V5h6v7h4l-7 7Z"/></svg>
+              </button>
+            </div>
             {#if textSideNeedsSave(sourceTab, 'right')}
               <button class="icon-button" aria-label="Save right text" title="Save right text" on:click={() => saveTextComparison(sourceTab.id, 'right')}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
@@ -1065,6 +1247,7 @@
         <div class="code-diff-body">
           {#key sourceTab.id}
             <DiffEditor
+              bind:this={diffEditor}
               leftText={sourceTab.textComparison.left}
               rightText={sourceTab.textComparison.right}
               rows={comparisonRows(sourceTab)}
@@ -1217,11 +1400,23 @@
           {:else if sourceTab.textComparison.result}
             <div class="editor-grid-header">
               <div>Left text</div>
-              <div>Right text</div>
+              <div class="header-with-action">
+                <span>Right text</span>
+                <div class="difference-nav" aria-label="Difference navigation">
+                  <span class="difference-count" title={differenceLabel(sourceTab)}>{differenceLabel(sourceTab)}</span>
+                  <button class="icon-button" aria-label="Previous difference" title="Previous difference" disabled={!differenceCount(sourceTab)} on:click={() => navigateDifference('previous')}>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 5 12h4v7h6v-7h4L12 5Z"/></svg>
+                  </button>
+                  <button class="icon-button" aria-label="Next difference" title="Next difference" disabled={!differenceCount(sourceTab)} on:click={() => navigateDifference('next')}>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19 5 12h4V5h6v7h4l-7 7Z"/></svg>
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="code-diff-body">
               {#key sourceTab.id}
                 <DiffEditor
+                  bind:this={diffEditor}
                   leftText={sourceTab.textComparison.left}
                   rightText={sourceTab.textComparison.right}
                   rows={comparisonRows(sourceTab)}
@@ -1264,58 +1459,84 @@
         <div class="folder-compare-body">
           <div class="split-rows">
             <div class="split-pane side-pane folder-side-pane" bind:this={leftComparePane} on:wheel={scrollComparisonFromSide}>
-              {#each activeTab.result?.rows || [] as row, index}
+              {#each visibleFolderRows(activeTab) as row}
                 <div
                   role="button"
                   tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
+                  class:selected={rowSelected(activeTab, row.rowIndex)}
+                  class:odd-row={row.rowIndex % 2 === 1}
                   class={`compare-side-row folder-cell status-${row.status}`}
-                  on:click={() => selectFolderRow(activeTab, index)}
-                  on:keydown={(event) => keySelectFolder(event, activeTab, index, row)}
+                  on:click={(event) => clickFolderSideRow(activeTab, row, event)}
+                  on:keydown={(event) => keySelectFolder(event, activeTab, row.rowIndex, row)}
                   on:dblclick={() => openFolderFile(row)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index, 'left')}
+                  on:contextmenu={(event) => showContext(event, activeTab, row, row.rowIndex, 'left')}
                 >
-                  {#if row.leftExists}
-                    <span class="entry-name">{row.name}</span>
-                    <span class="entry-type">{typeLabel(row.leftType)}</span>
+                  {#if nodeExists(row, 'left')}
+                    <span class="tree-spacer" style={`width: ${folderIndent(row)}`}></span>
+                    {#if rowIsFolder(row)}
+                      <button class="tree-toggle" aria-label={`${folderRowExpanded(activeTab, row) ? 'Collapse' : 'Expand'} ${row.name}`} on:click={(event) => toggleFolderNode(activeTab, row, event)}>
+                        {folderRowExpanded(activeTab, row) ? '▾' : '▸'}
+                      </button>
+                    {:else}
+                      <span class="tree-toggle-spacer"></span>
+                    {/if}
+                    {#if sideIsFolder(row, 'left')}
+                      <span class="folder-icon" aria-hidden="true"></span>
+                    {:else}
+                      <span class="entry-icon-spacer"></span>
+                    {/if}
+                    <span class="entry-name" title={nodePath(row, 'left')}>{row.name}</span>
+                    <span class="entry-type">{typeLabel(nodeType(row, 'left'))}</span>
                   {/if}
                 </div>
               {/each}
             </div>
             <div class="split-pane center-scroll-pane folder-center-pane" bind:this={centerComparePane} on:scroll={syncComparisonScroll}>
-              {#each activeTab.result?.rows || [] as row, index}
+              {#each visibleFolderRows(activeTab) as row}
                 <div
                   role="button"
                   tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
+                  class:selected={rowSelected(activeTab, row.rowIndex)}
+                  class:odd-row={row.rowIndex % 2 === 1}
                   class={`compare-status-row status-${row.status}`}
-                  title={row.error || row.status}
-                  on:click={() => selectFolderRow(activeTab, index)}
-                  on:keydown={(event) => keySelectFolder(event, activeTab, index, row)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index, 'center')}
+                  title={row.error || statusLabel(row.status)}
+                  on:click={(event) => clickFolderSideRow(activeTab, row, event)}
+                  on:keydown={(event) => keySelectFolder(event, activeTab, row.rowIndex, row)}
+                  on:contextmenu={(event) => showContext(event, activeTab, row, row.rowIndex, 'center')}
                 >
                   {indicator(row.status)}
                 </div>
               {/each}
             </div>
             <div class="split-pane side-pane folder-side-pane" bind:this={rightComparePane} on:wheel={scrollComparisonFromSide}>
-              {#each activeTab.result?.rows || [] as row, index}
+              {#each visibleFolderRows(activeTab) as row}
                 <div
                   role="button"
                   tabindex="0"
-                  class:selected={rowSelected(activeTab, index)}
-                  class:odd-row={index % 2 === 1}
+                  class:selected={rowSelected(activeTab, row.rowIndex)}
+                  class:odd-row={row.rowIndex % 2 === 1}
                   class={`compare-side-row folder-cell status-${row.status}`}
-                  on:click={() => selectFolderRow(activeTab, index)}
-                  on:keydown={(event) => keySelectFolder(event, activeTab, index, row)}
+                  on:click={() => selectFolderRow(activeTab, row.rowIndex)}
+                  on:keydown={(event) => keySelectFolder(event, activeTab, row.rowIndex, row)}
                   on:dblclick={() => openFolderFile(row)}
-                  on:contextmenu={(event) => showContext(event, activeTab, row, index, 'right')}
+                  on:contextmenu={(event) => showContext(event, activeTab, row, row.rowIndex, 'right')}
                 >
-                  {#if row.rightExists}
-                    <span class="entry-name">{row.name}</span>
-                    <span class="entry-type">{typeLabel(row.rightType)}</span>
+                  {#if nodeExists(row, 'right')}
+                    <span class="tree-spacer" style={`width: ${folderIndent(row)}`}></span>
+                    {#if rowIsFolder(row)}
+                      <button class="tree-toggle" aria-label={`${folderRowExpanded(activeTab, row) ? 'Collapse' : 'Expand'} ${row.name}`} on:click={(event) => toggleFolderNode(activeTab, row, event)}>
+                        {folderRowExpanded(activeTab, row) ? '▾' : '▸'}
+                      </button>
+                    {:else}
+                      <span class="tree-toggle-spacer"></span>
+                    {/if}
+                    {#if sideIsFolder(row, 'right')}
+                      <span class="folder-icon" aria-hidden="true"></span>
+                    {:else}
+                      <span class="entry-icon-spacer"></span>
+                    {/if}
+                    <span class="entry-name" title={nodePath(row, 'right')}>{row.name}</span>
+                    <span class="entry-type">{typeLabel(nodeType(row, 'right'))}</span>
                   {/if}
                 </div>
               {/each}
@@ -1344,6 +1565,15 @@
           </div>
           <div class="header-with-action">
             <span title={activeTab.rightPath}>Right file {activeTab.result?.rightDirty ? '•' : ''}</span>
+            <div class="difference-nav" aria-label="Difference navigation">
+              <span class="difference-count" title={differenceLabel(activeTab)}>{differenceLabel(activeTab)}</span>
+              <button class="icon-button" aria-label="Previous difference" title="Previous difference" disabled={!differenceCount(activeTab)} on:click={() => navigateDifference('previous')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 5 12h4v7h6v-7h4L12 5Z"/></svg>
+              </button>
+              <button class="icon-button" aria-label="Next difference" title="Next difference" disabled={!differenceCount(activeTab)} on:click={() => navigateDifference('next')}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19 5 12h4V5h6v7h4l-7 7Z"/></svg>
+              </button>
+            </div>
             {#if activeTab.result?.rightDirty}
               <button class="icon-button" aria-label="Save right file" title="Save right file" on:click={() => saveActive('right')}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
@@ -1354,6 +1584,7 @@
         <div class="code-diff-body">
           {#key activeTab.id}
             <DiffEditor
+              bind:this={diffEditor}
               leftText={sideTextValue(activeTab, 'left')}
               rightText={sideTextValue(activeTab, 'right')}
               rows={comparisonRows(activeTab)}

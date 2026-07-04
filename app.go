@@ -27,6 +27,9 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.folderSessions.SetUpdateEmitter(func(update compare.FolderComparisonUpdate) {
+		wailsRuntime.EventsEmit(ctx, "folder-comparison:update", update)
+	})
 }
 
 func (a *App) ChooseDirectory() (string, error) {
@@ -67,6 +70,10 @@ func (a *App) OpenFolderComparison(tabID string, leftPath string, rightPath stri
 
 func (a *App) RefreshFolderComparison(tabID string, leftPath string, rightPath string) (compare.FolderComparisonResult, error) {
 	return a.folderSessions.Refresh(tabID, leftPath, rightPath)
+}
+
+func (a *App) ExpandFolderComparisonNode(tabID string, nodeID string) (compare.FolderComparisonResult, error) {
+	return a.folderSessions.Expand(tabID, nodeID)
 }
 
 func (a *App) OpenFileComparison(tabID string, leftPath string, rightPath string) (compare.FileComparisonResult, error) {

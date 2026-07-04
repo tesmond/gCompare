@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCompareFolderAlignsSortedRowsAndStatuses(t *testing.T) {
@@ -33,12 +34,11 @@ func TestCompareFolderAlignsSortedRowsAndStatuses(t *testing.T) {
 	if len(result.Rows) != len(want) {
 		t.Fatalf("row count = %d, want %d", len(result.Rows), len(want))
 	}
-	lastName := ""
+	wantOrder := []string{"left.txt", "main.go", "README.md", "right.txt"}
+	if got := folderRowNames(result.Rows); !sameStrings(got, wantOrder) {
+		t.Fatalf("row names = %v, want %v", got, wantOrder)
+	}
 	for _, row := range result.Rows {
-		if row.Name < lastName {
-			t.Fatalf("rows are not sorted: %q before %q", row.Name, lastName)
-		}
-		lastName = row.Name
 		if row.Status != want[row.Name] {
 			t.Fatalf("%s status = %s, want %s", row.Name, row.Status, want[row.Name])
 		}
@@ -72,6 +72,116 @@ func TestCompareFolderTypeMismatch(t *testing.T) {
 	}
 }
 
+func TestCompareFolderSortsFoldersBeforeFilesAlphabetically(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, left)
+	mustMkdir(t, right)
+	mustWrite(t, filepath.Join(left, "alpha.txt"), "same\n")
+	mustWrite(t, filepath.Join(right, "alpha.txt"), "same\n")
+	mustMkdir(t, filepath.Join(left, "beta"))
+	mustMkdir(t, filepath.Join(right, "beta"))
+	mustWrite(t, filepath.Join(left, "zeta.txt"), "same\n")
+	mustWrite(t, filepath.Join(right, "zeta.txt"), "same\n")
+	mustMkdir(t, filepath.Join(left, "omega"))
+	mustMkdir(t, filepath.Join(right, "omega"))
+
+	result, err := CompareFolder(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"beta", "omega", "alpha.txt", "zeta.txt"}
+	if got := folderRowNames(result.Rows); !sameStrings(got, want) {
+		t.Fatalf("row names = %v, want %v", got, want)
+	}
+	if !result.Rows[0].HasChildren || !result.Rows[1].HasChildren {
+		t.Fatal("folder rows are not marked expandable")
+	}
+}
+
+func TestCompareFolderMarksTopLevelFolderDifferentWhenNestedFileDiffers(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, filepath.Join(left, "src"))
+	mustMkdir(t, filepath.Join(right, "src"))
+	mustWrite(t, filepath.Join(left, "src", "main.go"), "left\n")
+	mustWrite(t, filepath.Join(right, "src", "main.go"), "right\n")
+	mustWrite(t, filepath.Join(left, "src", "left-only.txt"), "left only\n")
+
+	result, err := CompareFolder(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(result.Rows))
+	}
+	if got := result.Rows[0].ID; got != "src" {
+		t.Fatalf("row id = %q, want src", got)
+	}
+	if got := result.Rows[0].Status; got != StatusDifferent {
+		t.Fatalf("src status = %s, want %s", got, StatusDifferent)
+	}
+}
+
+func TestFolderSessionExpandInsertsIndentedFolderFirstChildren(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, filepath.Join(left, "src", "lib"))
+	mustMkdir(t, filepath.Join(right, "src", "lib"))
+	mustWrite(t, filepath.Join(left, "src", "alpha.go"), "same\n")
+	mustWrite(t, filepath.Join(right, "src", "alpha.go"), "same\n")
+	mustWrite(t, filepath.Join(left, "src", "zeta.go"), "same\n")
+	mustWrite(t, filepath.Join(right, "src", "zeta.go"), "same\n")
+
+	store := NewFolderSessionStore()
+	result, err := store.Open("folder-tab", left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0].ID != "src" {
+		t.Fatalf("initial rows = %+v, want src only", result.Rows)
+	}
+
+	result, err = store.Expand("folder-tab", "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"src", "lib", "alpha.go", "zeta.go"}
+	if got := folderRowNames(result.Rows); !sameStrings(got, want) {
+		t.Fatalf("expanded row names = %v, want %v", got, want)
+	}
+	for _, row := range result.Rows[1:] {
+		if row.ParentID != "src" {
+			t.Fatalf("%s parent = %q, want src", row.Name, row.ParentID)
+		}
+		if row.Depth != 1 {
+			t.Fatalf("%s depth = %d, want 1", row.Name, row.Depth)
+		}
+	}
+	if !result.Rows[1].HasChildren {
+		t.Fatal("nested folder row is not marked expandable")
+	}
+
+	mustWrite(t, filepath.Join(left, "src", "lib", "nested.go"), "same\n")
+	mustWrite(t, filepath.Join(right, "src", "lib", "nested.go"), "same\n")
+	result, err = store.Expand("folder-tab", "src/lib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"src", "lib", "nested.go", "alpha.go", "zeta.go"}
+	if got := folderRowNames(result.Rows); !sameStrings(got, want) {
+		t.Fatalf("nested expanded row names = %v, want %v", got, want)
+	}
+	if result.Rows[2].ParentID != "src/lib" || result.Rows[2].Depth != 2 {
+		t.Fatalf("nested.go parent/depth = %q/%d, want src/lib/2", result.Rows[2].ParentID, result.Rows[2].Depth)
+	}
+}
+
 func TestFolderSessionRefreshDetectsChangedSameNamedFile(t *testing.T) {
 	root := t.TempDir()
 	left := filepath.Join(root, "left")
@@ -84,12 +194,19 @@ func TestFolderSessionRefreshDetectsChangedSameNamedFile(t *testing.T) {
 	mustWrite(t, rightFile, "same\n")
 
 	store := NewFolderSessionStore()
+	updates := make(chan FolderComparisonUpdate, 20)
+	store.SetUpdateEmitter(func(update FolderComparisonUpdate) {
+		updates <- update
+	})
 	result, err := store.Open("folder-tab", left, right)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Rows[0].Status; got != StatusEqual {
-		t.Fatalf("initial status = %s, want %s", got, StatusEqual)
+	if got := result.Rows[0].Status; got != StatusPending {
+		t.Fatalf("initial status = %s, want %s", got, StatusPending)
+	}
+	if got := waitForFolderStatus(t, updates, "same.txt"); got != StatusEqual {
+		t.Fatalf("resolved status = %s, want %s", got, StatusEqual)
 	}
 
 	mustWrite(t, rightFile, "diff\n")
@@ -97,8 +214,56 @@ func TestFolderSessionRefreshDetectsChangedSameNamedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Rows[0].Status; got != StatusDifferent {
+	if got := waitForFolderStatus(t, updates, "same.txt"); got != StatusDifferent {
 		t.Fatalf("refreshed status = %s, want %s", got, StatusDifferent)
+	}
+}
+
+func TestFolderSessionReturnsTopLevelFoldersBeforeRecursiveComparison(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, filepath.Join(left, "src"))
+	mustMkdir(t, filepath.Join(right, "src"))
+	mustWrite(t, filepath.Join(left, "src", "main.go"), "left\n")
+	mustWrite(t, filepath.Join(right, "src", "main.go"), "right\n")
+
+	updates := make(chan FolderComparisonUpdate, 20)
+	store := NewFolderSessionStore()
+	store.SetUpdateEmitter(func(update FolderComparisonUpdate) {
+		updates <- update
+	})
+
+	result, err := store.Open("folder-tab", left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(result.Rows))
+	}
+	if got := result.Rows[0].Name; got != "src" {
+		t.Fatalf("row name = %q, want src", got)
+	}
+	if got := result.Rows[0].Status; got != StatusPending {
+		t.Fatalf("initial status = %s, want %s", got, StatusPending)
+	}
+	if got := waitForFolderStatus(t, updates, "src"); got != StatusDifferent {
+		t.Fatalf("resolved folder status = %s, want %s", got, StatusDifferent)
+	}
+}
+
+func waitForFolderStatus(t *testing.T, updates <-chan FolderComparisonUpdate, nodeID string) ComparisonStatus {
+	t.Helper()
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case update := <-updates:
+			if update.NodeID == nodeID {
+				return update.Status
+			}
+		case <-timeout:
+			t.Fatalf("timed out waiting for update for %s", nodeID)
+		}
 	}
 }
 
@@ -114,4 +279,24 @@ func mustWrite(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func folderRowNames(rows []FolderComparisonRow) []string {
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.Name)
+	}
+	return names
+}
+
+func sameStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

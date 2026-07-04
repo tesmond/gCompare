@@ -13,6 +13,7 @@ const (
 type ComparisonStatus string
 
 const (
+	StatusPending      ComparisonStatus = "pending"
 	StatusEqual        ComparisonStatus = "equal"
 	StatusDifferent    ComparisonStatus = "different"
 	StatusLeftOnly     ComparisonStatus = "left_only"
@@ -49,6 +50,11 @@ type FolderComparisonResult struct {
 }
 
 type FolderComparisonRow struct {
+	ID              string           `json:"id"`
+	ParentID        string           `json:"parentID,omitempty"`
+	RowIndex        int              `json:"rowIndex"`
+	Depth           int              `json:"depth"`
+	HasChildren     bool             `json:"hasChildren"`
 	Name            string           `json:"name"`
 	LeftPath        string           `json:"leftPath"`
 	RightPath       string           `json:"rightPath"`

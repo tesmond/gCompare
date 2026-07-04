@@ -18,6 +18,7 @@
   let leftView;
   let rightView;
   let suppressChange = false;
+  let suppressSelection = false;
   let suppressScroll = false;
   let latestRows = [];
 
@@ -34,6 +35,32 @@
     if (row.status === 'right_only') return side === 'right' ? 'IMPORTANT_DIFF' : 'ORPHAN_GAP';
     if (row.status === 'equal') return 'MATCH';
     return 'IMPORTANT_DIFF';
+  }
+
+  function rowIsDifference(row) {
+    if (!row) return false;
+    if (row.status && row.status !== 'equal') return true;
+    return [row.semanticState, row.leftSemanticState, row.rightSemanticState].some(
+      (state) => state === 'IMPORTANT_DIFF' || state === 'UNIMPORTANT_DIFF' || state === 'ORPHAN_GAP'
+    );
+  }
+
+  function differenceGroups() {
+    const groups = [];
+    let current = null;
+    for (let index = 0; index < latestRows.length; index++) {
+      if (!rowIsDifference(latestRows[index])) {
+        current = null;
+        continue;
+      }
+      if (!current) {
+        current = { start: index, end: index };
+        groups.push(current);
+      } else {
+        current.end = index;
+      }
+    }
+    return groups;
   }
 
   function sideLineNumber(row, side) {
@@ -113,7 +140,7 @@
         if (update.docChanged && !suppressChange) {
           onChange(side, update.state.doc.toString());
         }
-        if (update.selectionSet) {
+        if (update.selectionSet && !suppressSelection) {
           emitSelection(side, update.view);
         }
       })
@@ -134,6 +161,50 @@
     const key = side === 'left' ? 'leftLineNumber' : 'rightLineNumber';
     const index = latestRows.findIndex((row) => row[key] === lineNumber);
     return index === -1 ? null : index;
+  }
+
+  function currentRightRowIndex() {
+    if (selectedRange?.start !== undefined && selectedRange?.start !== null) return selectedRange.start;
+    if (!rightView) return null;
+    const lineNumber = rightView.state.doc.lineAt(rightView.state.selection.main.head).number;
+    return rowIndexForLine('right', lineNumber);
+  }
+
+  function rightLineForGroup(group) {
+    if (!rightView || !group) return 1;
+    for (let index = group.start; index <= group.end; index++) {
+      const lineNumber = latestRows[index]?.rightLineNumber;
+      if (lineNumber) return lineNumber;
+    }
+    const insertIndex = latestRows[group.start]?.rightInsertIndex || 0;
+    return Math.max(1, Math.min(rightView.state.doc.lines, insertIndex + 1));
+  }
+
+  function targetGroupIndex(groups, direction) {
+    const current = currentRightRowIndex();
+    if (current === null || current === undefined) return direction === 'previous' ? groups.length - 1 : 0;
+    if (direction === 'previous') {
+      const previous = groups.findLastIndex((group) => group.end < current);
+      return previous === -1 ? groups.length - 1 : previous;
+    }
+    const next = groups.findIndex((group) => group.start > current);
+    return next === -1 ? 0 : next;
+  }
+
+  export function goToDifference(direction = 'next') {
+    if (!rightView) return;
+    const groups = differenceGroups();
+    if (!groups.length) return;
+    const group = groups[targetGroupIndex(groups, direction)];
+    const line = rightView.state.doc.line(rightLineForGroup(group));
+    suppressSelection = true;
+    rightView.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, { y: 'center' })
+    });
+    suppressSelection = false;
+    rightView.focus();
+    onSelectRange({ start: group.start, end: group.end, side: 'right' });
   }
 
   function replaceDocument(view, value) {

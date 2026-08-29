@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { EventsOn } from '../wailsjs/runtime/runtime';
   import DiffEditor from './DiffEditor.svelte';
+  import { formatStructuredText } from './structuredText.js';
 
   const appApi = () => window.go?.main?.App;
 
@@ -517,6 +518,25 @@
       };
     });
     runTextComparison(tabID);
+  }
+
+  function beautifyText(tab, side) {
+    if (!canUseTextComparison(tab)) return;
+    const value = tab.textComparison?.[side] || '';
+    try {
+      const formatted = formatStructuredText(value);
+      updateTextSource(tab.id, side, formatted.text);
+    } catch (err) {
+      const requestID = (textCompareRequests[tab.id] || 0) + 1;
+      textCompareRequests = { ...textCompareRequests, [tab.id]: requestID };
+      updateSourceTab(tab.id, (current) => ({
+        textComparison: {
+          ...current.textComparison,
+          loading: false,
+          error: err?.message || String(err)
+        }
+      }));
+    }
   }
 
   async function runTextComparison(tabID) {
@@ -1441,11 +1461,14 @@
             <span title={sourceTab.textComparison.leftPath || 'Left text'}>
               {sourceTab.textComparison.leftPath || 'Left text'} {textSideDirty(sourceTab, 'left') ? '•' : ''}
             </span>
-            {#if textSideNeedsSave(sourceTab, 'left')}
-              <button class="icon-button" aria-label="Save left text" title="Save left text" on:click={() => saveTextComparison(sourceTab.id, 'left')}>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
-              </button>
-            {/if}
+            <div class="pane-actions">
+              <button class="format-button" aria-label="Beautify left JSON or Python text" title="Beautify JSON or Python" disabled={!sourceTab.textComparison.left.trim()} on:click={() => beautifyText(sourceTab, 'left')}>Beautify</button>
+              {#if textSideNeedsSave(sourceTab, 'left')}
+                <button class="icon-button" aria-label="Save left text" title="Save left text" on:click={() => saveTextComparison(sourceTab.id, 'left')}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+                </button>
+              {/if}
+            </div>
           </div>
           <div class="header-with-action">
             <span title={sourceTab.textComparison.rightPath || 'Right text'}>
@@ -1460,11 +1483,14 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19 5 12h4V5h6v7h4l-7 7Z"/></svg>
               </button>
             </div>
-            {#if textSideNeedsSave(sourceTab, 'right')}
-              <button class="icon-button" aria-label="Save right text" title="Save right text" on:click={() => saveTextComparison(sourceTab.id, 'right')}>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
-              </button>
-            {/if}
+            <div class="pane-actions">
+              <button class="format-button" aria-label="Beautify right JSON or Python text" title="Beautify JSON or Python" disabled={!sourceTab.textComparison.right.trim()} on:click={() => beautifyText(sourceTab, 'right')}>Beautify</button>
+              {#if textSideNeedsSave(sourceTab, 'right')}
+                <button class="icon-button" aria-label="Save right text" title="Save right text" on:click={() => saveTextComparison(sourceTab.id, 'right')}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l2 2v16H5V3Zm3 0v6h8V3H8Zm0 14h8v-5H8v5Z"/></svg>
+                </button>
+              {/if}
+            </div>
           </div>
         </div>
         <div class="code-diff-body">

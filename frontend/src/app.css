@@ -530,6 +530,17 @@ button:disabled {
   white-space: nowrap;
 }
 
+.pane-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.format-button {
+  min-height: 26px;
+  padding: 3px 8px;
+}
+
 .difference-nav {
   align-items: center;
   display: inline-flex;
@@ -1126,6 +1137,13 @@ button:disabled {
 
 .code-diff-editor .cm-scroller {
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.code-diff-editor .cm-content {
+  min-width: max-content;
+  white-space: pre !important;
 }
 
 .code-diff-editor .cm-gutters {

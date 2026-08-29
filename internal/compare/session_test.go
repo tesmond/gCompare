@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOpenFileComparisonAlignsChangedAndMissingLines(t *testing.T) {
@@ -123,5 +124,64 @@ func TestSaveWritesDirtySide(t *testing.T) {
 	}
 	if string(onDisk) != "one\ntwo\n" {
 		t.Fatalf("saved content = %q", string(onDisk))
+	}
+}
+
+func TestSessionStoreReportsExternalFileChanges(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left.txt")
+	right := filepath.Join(root, "right.txt")
+	mustWrite(t, left, "same\n")
+	mustWrite(t, right, "same\n")
+
+	changes := make(chan FileChangeUpdate, 4)
+	store := NewSessionStore()
+	store.SetFileChangeEmitter(func(update FileChangeUpdate) {
+		changes <- update
+	})
+	if _, err := store.Open("tab", left, right); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close("tab")
+
+	time.Sleep(10 * time.Millisecond)
+	mustWrite(t, right, "changed on disk\n")
+	select {
+	case update := <-changes:
+		if update.TabID != "tab" || update.Side != "right" || update.Path != right {
+			t.Fatalf("unexpected update: %+v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for external file change")
+	}
+}
+
+func TestSessionStoreDoesNotReportItsOwnSave(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left.txt")
+	right := filepath.Join(root, "right.txt")
+	mustWrite(t, left, "same\n")
+	mustWrite(t, right, "same\n")
+
+	changes := make(chan FileChangeUpdate, 4)
+	store := NewSessionStore()
+	store.SetFileChangeEmitter(func(update FileChangeUpdate) {
+		changes <- update
+	})
+	if _, err := store.Open("tab", left, right); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close("tab")
+	if _, err := store.ReplaceText("tab", "right", "saved by viewer\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Save("tab", "right"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case update := <-changes:
+		t.Fatalf("viewer save produced external update: %+v", update)
+	case <-time.After(fileChangePollInterval + 250*time.Millisecond):
 	}
 }

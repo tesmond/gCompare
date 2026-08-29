@@ -72,6 +72,34 @@ func TestCompareFolderTypeMismatch(t *testing.T) {
 	}
 }
 
+func TestFolderSessionReturnsObviousStatusesWithoutPending(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, left)
+	mustMkdir(t, right)
+	mustWrite(t, filepath.Join(left, "left-only.txt"), "left\n")
+	mustWrite(t, filepath.Join(left, "type-mismatch"), "file\n")
+	mustMkdir(t, filepath.Join(right, "type-mismatch"))
+
+	store := NewFolderSessionStore()
+	result, err := store.Open("folder-tab", left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := map[string]ComparisonStatus{}
+	for _, row := range result.Rows {
+		statuses[row.Name] = row.Status
+	}
+	if got := statuses["left-only.txt"]; got != StatusLeftOnly {
+		t.Fatalf("left-only status = %s, want %s", got, StatusLeftOnly)
+	}
+	if got := statuses["type-mismatch"]; got != StatusTypeMismatch {
+		t.Fatalf("type-mismatch status = %s, want %s", got, StatusTypeMismatch)
+	}
+}
+
 func TestCompareFolderSortsFoldersBeforeFilesAlphabetically(t *testing.T) {
 	root := t.TempDir()
 	left := filepath.Join(root, "left")
@@ -252,6 +280,82 @@ func TestFolderSessionReturnsTopLevelFoldersBeforeRecursiveComparison(t *testing
 	}
 }
 
+func TestFolderSessionExpandReusesVerifiedRecursiveResults(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, filepath.Join(left, "src"))
+	mustMkdir(t, filepath.Join(right, "src"))
+	mustWrite(t, filepath.Join(left, "src", "main.go"), "same\n")
+	mustWrite(t, filepath.Join(right, "src", "main.go"), "same\n")
+
+	updates := make(chan FolderComparisonUpdate, 20)
+	store := NewFolderSessionStore()
+	store.SetUpdateEmitter(func(update FolderComparisonUpdate) {
+		updates <- update
+	})
+
+	if _, err := store.Open("folder-tab", left, right); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForFolderStatus(t, updates, "src"); got != StatusEqual {
+		t.Fatalf("src status = %s, want %s", got, StatusEqual)
+	}
+
+	result, err := store.Expand("folder-tab", "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("row count = %d, want 2", len(result.Rows))
+	}
+	if got := result.Rows[1].Status; got != StatusEqual {
+		t.Fatalf("cached child status = %s, want %s", got, StatusEqual)
+	}
+}
+
+func TestFolderSessionRefreshNodeRebuildsOnlySelectedSubtree(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	mustMkdir(t, filepath.Join(left, "src"))
+	mustMkdir(t, filepath.Join(right, "src"))
+	mustMkdir(t, filepath.Join(left, "other"))
+	mustMkdir(t, filepath.Join(right, "other"))
+	mustWrite(t, filepath.Join(left, "src", "main.go"), "same\n")
+	mustWrite(t, filepath.Join(right, "src", "main.go"), "same\n")
+	mustWrite(t, filepath.Join(left, "other", "keep.txt"), "same\n")
+	mustWrite(t, filepath.Join(right, "other", "keep.txt"), "same\n")
+
+	updates := make(chan FolderComparisonUpdate, 40)
+	store := NewFolderSessionStore()
+	store.SetUpdateEmitter(func(update FolderComparisonUpdate) {
+		updates <- update
+	})
+	if _, err := store.Open("folder-tab", left, right); err != nil {
+		t.Fatal(err)
+	}
+	waitForFolderStatuses(t, updates, "src", "other")
+	if _, err := store.Expand("folder-tab", "src"); err != nil {
+		t.Fatal(err)
+	}
+
+	mustWrite(t, filepath.Join(right, "src", "new.go"), "new\n")
+	result, err := store.RefreshNode("folder-tab", "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Rows[0].Name; got != "other" {
+		t.Fatalf("unrelated first row = %q, want other", got)
+	}
+	if got := result.Rows[0].Status; got != StatusEqual {
+		t.Fatalf("unrelated status = %s, want %s", got, StatusEqual)
+	}
+	if got := waitForFolderStatus(t, updates, "src"); got != StatusDifferent {
+		t.Fatalf("refreshed src status = %s, want %s", got, StatusDifferent)
+	}
+}
+
 func waitForFolderStatus(t *testing.T, updates <-chan FolderComparisonUpdate, nodeID string) ComparisonStatus {
 	t.Helper()
 	timeout := time.After(2 * time.Second)
@@ -263,6 +367,23 @@ func waitForFolderStatus(t *testing.T, updates <-chan FolderComparisonUpdate, no
 			}
 		case <-timeout:
 			t.Fatalf("timed out waiting for update for %s", nodeID)
+		}
+	}
+}
+
+func waitForFolderStatuses(t *testing.T, updates <-chan FolderComparisonUpdate, nodeIDs ...string) {
+	t.Helper()
+	pending := map[string]bool{}
+	for _, nodeID := range nodeIDs {
+		pending[nodeID] = true
+	}
+	timeout := time.After(2 * time.Second)
+	for len(pending) > 0 {
+		select {
+		case update := <-updates:
+			delete(pending, update.NodeID)
+		case <-timeout:
+			t.Fatalf("timed out waiting for updates: %v", pending)
 		}
 	}
 }

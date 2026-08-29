@@ -30,6 +30,9 @@ func (a *App) startup(ctx context.Context) {
 	a.folderSessions.SetUpdateEmitter(func(update compare.FolderComparisonUpdate) {
 		wailsRuntime.EventsEmit(ctx, "folder-comparison:update", update)
 	})
+	a.sessions.SetFileChangeEmitter(func(update compare.FileChangeUpdate) {
+		wailsRuntime.EventsEmit(ctx, "file-comparison:changed", update)
+	})
 }
 
 func (a *App) ChooseDirectory() (string, error) {
@@ -76,6 +79,10 @@ func (a *App) ExpandFolderComparisonNode(tabID string, nodeID string) (compare.F
 	return a.folderSessions.Expand(tabID, nodeID)
 }
 
+func (a *App) RefreshFolderComparisonNode(tabID string, nodeID string) (compare.FolderComparisonResult, error) {
+	return a.folderSessions.RefreshNode(tabID, nodeID)
+}
+
 func (a *App) OpenFileComparison(tabID string, leftPath string, rightPath string) (compare.FileComparisonResult, error) {
 	return a.sessions.Open(tabID, leftPath, rightPath)
 }
@@ -93,6 +100,10 @@ func (a *App) WriteTextFile(path string, text string) error {
 
 func (a *App) RefreshFileComparison(tabID string) (compare.FileComparisonResult, error) {
 	return a.sessions.Refresh(tabID)
+}
+
+func (a *App) ReloadFileComparison(tabID string) (compare.FileComparisonResult, error) {
+	return a.sessions.Reload(tabID)
 }
 
 func (a *App) UpdateFileComparisonText(tabID string, side string, text string) (compare.FileComparisonResult, error) {

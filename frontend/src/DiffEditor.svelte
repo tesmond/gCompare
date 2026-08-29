@@ -3,6 +3,7 @@
   import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
   import { Decoration, EditorView, drawSelection, keymap, lineNumbers } from '@codemirror/view';
+  import { applyLinkedScrollDelta, syncLinkedScrollPosition, wheelDeltaPixels } from './linkedScroll.js';
 
   export let leftText = '';
   export let rightText = '';
@@ -19,8 +20,9 @@
   let rightView;
   let suppressChange = false;
   let suppressSelection = false;
-  let suppressScroll = false;
   let latestRows = [];
+  let resizeObserver;
+  let scrollRangeFrame = 0;
 
   const setRowsEffect = StateEffect.define();
 
@@ -135,7 +137,6 @@
       decorationField(side),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorState.tabSize.of(2),
-      EditorView.lineWrapping,
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !suppressChange) {
           onChange(side, update.state.doc.toString());
@@ -214,6 +215,7 @@
     suppressChange = true;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
     suppressChange = false;
+    scheduleEqualScrollRanges();
   }
 
   function refreshDecorations() {
@@ -221,26 +223,74 @@
     rightView?.dispatch({ effects: setRowsEffect.of(latestRows) });
   }
 
-  function syncScroll(source, target) {
-    if (!source || !target || suppressScroll) return;
-    suppressScroll = true;
-    target.scrollDOM.scrollTop = source.scrollDOM.scrollTop;
-    target.scrollDOM.scrollLeft = source.scrollDOM.scrollLeft;
+  function scrollDOMs() {
+    return [leftView?.scrollDOM, rightView?.scrollDOM].filter(Boolean);
+  }
+
+  function reportViewport(scroller) {
+    if (!scroller) return;
     onViewportChange({
-      scrollTop: source.scrollDOM.scrollTop,
-      clientHeight: source.scrollDOM.clientHeight
+      scrollTop: scroller.scrollTop,
+      clientHeight: scroller.clientHeight
     });
-    requestAnimationFrame(() => {
-      suppressScroll = false;
-    });
+  }
+
+  function syncScroll(source) {
+    if (!source) return;
+    syncLinkedScrollPosition(scrollDOMs(), source.scrollDOM);
+    reportViewport(source.scrollDOM);
   }
 
   function handleLeftScroll() {
-    syncScroll(leftView, rightView);
+    syncScroll(leftView);
   }
 
   function handleRightScroll() {
-    syncScroll(rightView, leftView);
+    syncScroll(rightView);
+  }
+
+  function handleWheel(event, source) {
+    if (!source || event.ctrlKey) return;
+    const deltas = wheelDeltaPixels(event, source.scrollDOM);
+    if (!deltas.deltaX && !deltas.deltaY) return;
+    event.preventDefault();
+    syncLinkedScrollPosition(scrollDOMs(), source.scrollDOM);
+    applyLinkedScrollDelta(scrollDOMs(), deltas.deltaX, deltas.deltaY);
+    reportViewport(source.scrollDOM);
+  }
+
+  function handleLeftWheel(event) {
+    handleWheel(event, leftView);
+  }
+
+  function handleRightWheel(event) {
+    handleWheel(event, rightView);
+  }
+
+  function scheduleEqualScrollRanges() {
+    if (!leftView || !rightView) return;
+    cancelAnimationFrame(scrollRangeFrame);
+    scrollRangeFrame = requestAnimationFrame(() => {
+      const views = [leftView, rightView].filter(Boolean);
+      for (const view of views) {
+        view.contentDOM.style.paddingRight = '';
+        view.contentDOM.style.paddingBottom = '';
+      }
+
+      const widths = views.map((view) => view.scrollDOM.scrollWidth);
+      const heights = views.map((view) => view.scrollDOM.scrollHeight);
+      const maximumWidth = Math.max(...widths);
+      const maximumHeight = Math.max(...heights);
+      for (let index = 0; index < views.length; index++) {
+        const view = views[index];
+        const computed = getComputedStyle(view.contentDOM);
+        const baseRight = Number.parseFloat(computed.paddingRight) || 0;
+        const baseBottom = Number.parseFloat(computed.paddingBottom) || 0;
+        view.contentDOM.style.paddingRight = `${baseRight + maximumWidth - widths[index]}px`;
+        view.contentDOM.style.paddingBottom = `${baseBottom + maximumHeight - heights[index]}px`;
+      }
+      syncLinkedScrollPosition(scrollDOMs(), leftView.scrollDOM);
+    });
   }
 
   function editorForTarget(target) {
@@ -286,20 +336,30 @@
     rightView = createEditor(rightHost, 'right', rightText);
     leftView.scrollDOM.addEventListener('scroll', handleLeftScroll);
     rightView.scrollDOM.addEventListener('scroll', handleRightScroll);
+    leftView.scrollDOM.addEventListener('wheel', handleLeftWheel, { passive: false });
+    rightView.scrollDOM.addEventListener('wheel', handleRightWheel, { passive: false });
     leftHost.addEventListener('contextmenu', handleContextMenu);
     rightHost.addEventListener('contextmenu', handleContextMenu);
+    resizeObserver = new ResizeObserver(scheduleEqualScrollRanges);
+    resizeObserver.observe(leftHost);
+    resizeObserver.observe(rightHost);
     tick().then(() => {
       if (leftView) {
         onViewportChange({ scrollTop: leftView.scrollDOM.scrollTop, clientHeight: leftView.scrollDOM.clientHeight });
       }
+      scheduleEqualScrollRanges();
     });
   });
 
   onDestroy(() => {
     leftView?.scrollDOM.removeEventListener('scroll', handleLeftScroll);
     rightView?.scrollDOM.removeEventListener('scroll', handleRightScroll);
+    leftView?.scrollDOM.removeEventListener('wheel', handleLeftWheel);
+    rightView?.scrollDOM.removeEventListener('wheel', handleRightWheel);
     leftHost?.removeEventListener('contextmenu', handleContextMenu);
     rightHost?.removeEventListener('contextmenu', handleContextMenu);
+    resizeObserver?.disconnect();
+    cancelAnimationFrame(scrollRangeFrame);
     leftView?.destroy();
     rightView?.destroy();
     leftView = null;

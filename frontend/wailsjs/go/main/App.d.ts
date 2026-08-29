@@ -40,6 +40,10 @@ export function RefreshFileComparison(arg1:string):Promise<compare.FileCompariso
 
 export function RefreshFolderComparison(arg1:string,arg2:string,arg3:string):Promise<compare.FolderComparisonResult>;
 
+export function RefreshFolderComparisonNode(arg1:string,arg2:string):Promise<compare.FolderComparisonResult>;
+
+export function ReloadFileComparison(arg1:string):Promise<compare.FileComparisonResult>;
+
 export function RevealPath(arg1:string):Promise<void>;
 
 export function SaveFileComparison(arg1:string,arg2:string):Promise<compare.FileComparisonResult>;

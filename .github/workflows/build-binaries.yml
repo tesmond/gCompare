@@ -2,10 +2,8 @@ name: Build binaries
 
 on:
   push:
-    branches:
-      - master
-  pull_request:
-  workflow_dispatch:
+    tags:
+      - '**'
 
 permissions:
   contents: read
@@ -90,3 +88,42 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.archive }}
           if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gCompare-windows-amd64
+          path: dist/windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gCompare-linux-amd64
+          path: dist/linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: gCompare-macos-universal
+          path: dist/macos
+
+      - name: Create release and upload binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/windows/gCompare-windows-amd64.zip
+          dist/linux/gCompare-linux-amd64.tar.gz
+          dist/macos/gCompare-macos-universal.tar.gz
+          --repo "$GH_REPO"
+          --verify-tag
+          --title "$GITHUB_REF_NAME"
+          --generate-notes

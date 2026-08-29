@@ -11,27 +11,55 @@ import (
 )
 
 const maxDisplayFileSize = 2 * 1024 * 1024
+const fileChangePollInterval = 500 * time.Millisecond
+
+type FileChangeUpdate struct {
+	TabID string `json:"tabID"`
+	Side  string `json:"side"`
+	Path  string `json:"path"`
+}
+
+type fileSignature struct {
+	exists        bool
+	size          int64
+	mode          os.FileMode
+	modifiedNanos int64
+}
 
 type fileSession struct {
-	id           string
-	leftPath     string
-	rightPath    string
-	left         []textLine
-	right        []textLine
-	leftDirty    bool
-	rightDirty   bool
-	leftModTime  time.Time
-	rightModTime time.Time
-	warning      string
+	watchMu       sync.Mutex
+	id            string
+	leftPath      string
+	rightPath     string
+	left          []textLine
+	right         []textLine
+	leftDirty     bool
+	rightDirty    bool
+	leftModTime   time.Time
+	rightModTime  time.Time
+	warning       string
+	leftObserved  fileSignature
+	rightObserved fileSignature
+	leftSaving    bool
+	rightSaving   bool
+	stopWatching  chan struct{}
+	watchStopped  sync.Once
 }
 
 type SessionStore struct {
-	mu       sync.Mutex
-	sessions map[string]*fileSession
+	mu         sync.Mutex
+	sessions   map[string]*fileSession
+	emitChange func(FileChangeUpdate)
 }
 
 func NewSessionStore() *SessionStore {
 	return &SessionStore{sessions: map[string]*fileSession{}}
+}
+
+func (s *SessionStore) SetFileChangeEmitter(emit func(FileChangeUpdate)) {
+	s.mu.Lock()
+	s.emitChange = emit
+	s.mu.Unlock()
 }
 
 func (s *SessionStore) Open(tabID string, leftPath string, rightPath string) (FileComparisonResult, error) {
@@ -50,21 +78,38 @@ func (s *SessionStore) Open(tabID string, leftPath string, rightPath string) (Fi
 
 	warning := joinWarnings(leftWarning, rightWarning)
 	session := &fileSession{
-		id:           tabID,
-		leftPath:     leftPath,
-		rightPath:    rightPath,
-		left:         leftLines,
-		right:        rightLines,
-		leftModTime:  leftInfo.ModTime(),
-		rightModTime: rightInfo.ModTime(),
-		warning:      warning,
+		id:            tabID,
+		leftPath:      leftPath,
+		rightPath:     rightPath,
+		left:          leftLines,
+		right:         rightLines,
+		leftModTime:   leftInfo.ModTime(),
+		rightModTime:  rightInfo.ModTime(),
+		warning:       warning,
+		leftObserved:  signatureFromInfo(leftInfo),
+		rightObserved: signatureFromInfo(rightInfo),
+		stopWatching:  make(chan struct{}),
 	}
 
 	s.mu.Lock()
+	previous := s.sessions[tabID]
 	s.sessions[tabID] = session
+	emitChange := s.emitChange
 	s.mu.Unlock()
+	if previous != nil {
+		previous.stopFileWatcher()
+	}
+	session.startFileWatcher(emitChange)
 
 	return session.result(), nil
+}
+
+func (s *SessionStore) Reload(tabID string) (FileComparisonResult, error) {
+	session, err := s.get(tabID)
+	if err != nil {
+		return FileComparisonResult{}, err
+	}
+	return s.Open(tabID, session.leftPath, session.rightPath)
 }
 
 func (s *SessionStore) Refresh(tabID string) (FileComparisonResult, error) {
@@ -138,25 +183,33 @@ func (s *SessionStore) Save(tabID string, side string) (FileComparisonResult, er
 
 	switch side {
 	case "left":
+		session.setSaving("left", true)
 		if err := session.saveSide(session.leftPath, session.left, session.leftModTime); err != nil {
+			session.setSaving("left", false)
 			return FileComparisonResult{}, err
 		}
 		info, err := os.Stat(session.leftPath)
 		if err != nil {
+			session.setSaving("left", false)
 			return FileComparisonResult{}, err
 		}
 		session.leftModTime = info.ModTime()
 		session.leftDirty = false
+		session.finishSave("left", info)
 	case "right":
+		session.setSaving("right", true)
 		if err := session.saveSide(session.rightPath, session.right, session.rightModTime); err != nil {
+			session.setSaving("right", false)
 			return FileComparisonResult{}, err
 		}
 		info, err := os.Stat(session.rightPath)
 		if err != nil {
+			session.setSaving("right", false)
 			return FileComparisonResult{}, err
 		}
 		session.rightModTime = info.ModTime()
 		session.rightDirty = false
+		session.finishSave("right", info)
 	case "both":
 		if session.leftDirty {
 			if _, err := s.Save(tabID, "left"); err != nil {
@@ -203,8 +256,12 @@ func (s *SessionStore) Discard(tabID string) (FileComparisonResult, error) {
 
 func (s *SessionStore) Close(tabID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	session := s.sessions[tabID]
 	delete(s.sessions, tabID)
+	s.mu.Unlock()
+	if session != nil {
+		session.stopFileWatcher()
+	}
 }
 
 func (s *SessionStore) get(tabID string) (*fileSession, error) {
@@ -230,6 +287,98 @@ func (session *fileSession) saveSide(path string, lines []textLine, knownModTime
 		return fmt.Errorf("file changed on disk since opening: %s", path)
 	}
 	return os.WriteFile(path, linesToBytes(lines), info.Mode().Perm())
+}
+
+func signatureFromInfo(info os.FileInfo) fileSignature {
+	return fileSignature{
+		exists:        true,
+		size:          info.Size(),
+		mode:          info.Mode(),
+		modifiedNanos: info.ModTime().UnixNano(),
+	}
+}
+
+func statFileSignature(path string) fileSignature {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileSignature{}
+	}
+	return signatureFromInfo(info)
+}
+
+func (session *fileSession) setSaving(side string, saving bool) {
+	session.watchMu.Lock()
+	defer session.watchMu.Unlock()
+	if side == "left" {
+		session.leftSaving = saving
+	} else {
+		session.rightSaving = saving
+	}
+}
+
+func (session *fileSession) finishSave(side string, info os.FileInfo) {
+	session.watchMu.Lock()
+	defer session.watchMu.Unlock()
+	if side == "left" {
+		session.leftObserved = signatureFromInfo(info)
+		session.leftSaving = false
+	} else {
+		session.rightObserved = signatureFromInfo(info)
+		session.rightSaving = false
+	}
+}
+
+func (session *fileSession) startFileWatcher(emit func(FileChangeUpdate)) {
+	if emit == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(fileChangePollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				session.pollFileChanges(emit)
+			case <-session.stopWatching:
+				return
+			}
+		}
+	}()
+}
+
+func (session *fileSession) stopFileWatcher() {
+	session.watchStopped.Do(func() {
+		close(session.stopWatching)
+	})
+}
+
+func (session *fileSession) pollFileChanges(emit func(FileChangeUpdate)) {
+	type watchedSide struct {
+		name string
+		path string
+	}
+	for _, side := range []watchedSide{{name: "left", path: session.leftPath}, {name: "right", path: session.rightPath}} {
+		current := statFileSignature(side.path)
+		session.watchMu.Lock()
+		observed := session.rightObserved
+		saving := session.rightSaving
+		if side.name == "left" {
+			observed = session.leftObserved
+			saving = session.leftSaving
+		}
+		changed := current != observed
+		if changed {
+			if side.name == "left" {
+				session.leftObserved = current
+			} else {
+				session.rightObserved = current
+			}
+		}
+		session.watchMu.Unlock()
+		if changed && !saving {
+			emit(FileChangeUpdate{TabID: session.id, Side: side.name, Path: side.path})
+		}
+	}
 }
 
 func readTextFile(path string) ([]textLine, os.FileInfo, string, error) {

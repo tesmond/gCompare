@@ -93,12 +93,28 @@ button:disabled {
   border: 1px solid #c8d0da;
   border-bottom: 0;
   border-radius: 6px 6px 0 0;
-  background: #ffffff;
+  background: #e9eef5;
+  color: #526174;
 }
 
 .tab.active {
   background: #ffffff;
-  border-color: #a9b7c8;
+  border-color: #276fa8;
+  border-top: 3px solid #276fa8;
+  color: #17202a;
+  font-weight: 700;
+  margin-top: -2px;
+  position: relative;
+}
+
+.tab.active::after {
+  background: #ffffff;
+  bottom: -1px;
+  content: "";
+  height: 2px;
+  left: 0;
+  position: absolute;
+  right: 0;
 }
 
 .tab-main,
@@ -418,8 +434,32 @@ button:disabled {
   border-bottom: 1px solid #d6dde6;
   display: grid;
   gap: 36px;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   padding: 8px 12px;
+}
+
+.refresh-button {
+  min-width: 92px;
+  white-space: nowrap;
+}
+
+.external-change-banner {
+  align-items: center;
+  background: #fff4d7;
+  border: 1px solid #d5a64f;
+  color: #61420a;
+  display: flex;
+  gap: 12px;
+  grid-column: 1 / -1;
+  justify-content: space-between;
+  margin-top: 2px;
+  padding: 8px 10px;
+}
+
+.external-change-banner > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .path-strip span {

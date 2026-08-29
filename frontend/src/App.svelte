@@ -22,6 +22,7 @@
   let mapScrollTop = 0;
   let mapViewportHeight = 0;
   let unsubscribeFolderUpdates = null;
+  let unsubscribeFileChanges = null;
   const fileRowHeight = 28;
   const emptyBrowser = () => ({
     mode: 'empty',
@@ -206,7 +207,8 @@
         loading: true,
         error: '',
         selectionStart: null,
-        selectionEnd: null
+        selectionEnd: null,
+        externalChanges: {}
       };
       if (options.tabID) {
         updateTab(tab.id, tab);
@@ -232,7 +234,14 @@
     try {
       if (activeTab.mode === 'folder') {
         const result = await backend().RefreshFolderComparison(activeTab.id, activeTab.leftPath, activeTab.rightPath);
-        updateTab(activeTab.id, { result, loading: false });
+        updateTab(activeTab.id, {
+          result,
+          loading: false,
+          selectedRow: null,
+          expanded: {},
+          loadedFolders: {},
+          loadingFolders: {}
+        });
       } else {
         const result = await backend().RefreshFileComparison(activeTab.id);
         updateTab(activeTab.id, { result, loading: false });
@@ -242,12 +251,34 @@
     }
   }
 
+  function folderProgress(tab) {
+    const rows = tab?.result?.rows || [];
+    const completed = rows.filter((row) => row.status !== 'pending').length;
+    return { completed, total: rows.length, pending: rows.length - completed };
+  }
+
+  function folderComparisonRunning(tab) {
+    return tab?.mode === 'folder' && folderProgress(tab).pending > 0;
+  }
+
+  function refreshLabel(tab) {
+    if (!folderComparisonRunning(tab)) return 'Refresh';
+    const progress = folderProgress(tab);
+    return `Comparing ${progress.completed}/${progress.total}`;
+  }
+
   async function saveActive(side = 'both') {
-    if (!activeTab || activeTab.mode !== 'file') return;
+    const tab = activeTab;
+    if (!tab || tab.mode !== 'file') return;
     error = '';
     try {
-      const result = await backend().SaveFileComparison(activeTab.id, side);
-      updateTab(activeTab.id, { result });
+      const result = await backend().SaveFileComparison(tab.id, side);
+      updateTab(tab.id, (current) => {
+        const externalChanges = { ...(current.externalChanges || {}) };
+        if (side === 'both' || side === 'left') delete externalChanges.left;
+        if (side === 'both' || side === 'right') delete externalChanges.right;
+        return { result, externalChanges };
+      });
     } catch (err) {
       failActive(err);
     }
@@ -1036,7 +1067,7 @@
   function updateFolderNode(update) {
     if (!update?.tabID || !update.nodeID) return;
     updateTab(update.tabID, (tab) => {
-      if (tab.mode !== 'folder' || !tab.result?.rows) return {};
+      if (tab.mode !== 'folder' || !tab.result?.rows || update.revision !== tab.result.revision) return {};
       return {
         result: {
           ...tab.result,
@@ -1046,6 +1077,59 @@
         }
       };
     });
+  }
+
+  function updateFileChange(update) {
+    if (!update?.tabID || !update.side) return;
+    updateTab(update.tabID, (tab) => {
+      if (tab.mode !== 'file') return {};
+      return {
+        externalChanges: {
+          ...(tab.externalChanges || {}),
+          [update.side]: update.path || (update.side === 'left' ? tab.leftPath : tab.rightPath)
+        }
+      };
+    });
+  }
+
+  function externalChangeSides(tab) {
+    return Object.keys(tab?.externalChanges || {}).filter((side) => tab.externalChanges[side]);
+  }
+
+  function externalChangeMessage(tab) {
+    const sides = externalChangeSides(tab);
+    if (sides.length === 2) return 'Both files changed on disk.';
+    return `${sides[0] === 'left' ? 'The left file' : 'The right file'} changed on disk.`;
+  }
+
+  async function reloadExternalChanges(tab) {
+    if (!tab || tab.mode !== 'file') return;
+    if (tabDirty(tab) && !confirm('Discard local edits and reload both files from disk?')) return;
+    error = '';
+    updateTab(tab.id, { loading: true, error: '' });
+    try {
+      const result = await backend().ReloadFileComparison(tab.id);
+      updateTab(tab.id, { result, loading: false, externalChanges: {} });
+    } catch (err) {
+      failTab(tab.id, err);
+    }
+  }
+
+  function keepExternalEdits(tab) {
+    if (!tab) return;
+    error = '';
+    updateTab(tab.id, { externalChanges: {} });
+  }
+
+  async function saveAfterExternalChange(tab) {
+    if (!tab || tab.mode !== 'file' || !tabDirty(tab)) return;
+    error = '';
+    try {
+      const result = await backend().SaveFileComparison(tab.id, 'both');
+      updateTab(tab.id, { result });
+    } catch (err) {
+      error = err?.message || String(err);
+    }
   }
 
   function mapColor(row) {
@@ -1112,12 +1196,28 @@
 
   function hasFolderMenuActions(row) {
     return (
+      rowIsFolder(row) ||
       canOpenFolderFile(row) ||
       canCopyFolderFile(row, 'ltr') ||
       canCopyFolderFile(row, 'rtl') ||
       canRevealFolderSide(row, 'left') ||
       canRevealFolderSide(row, 'right')
     );
+  }
+
+  async function refreshContextFolder() {
+    if (!contextMenu) return;
+    const tab = getTab(contextMenu.tabID);
+    const row = contextMenu.row;
+    hideContext();
+    if (!tab || tab.mode !== 'folder' || !rowIsFolder(row)) return;
+    updateTab(tab.id, { error: '' });
+    try {
+      const result = await backend().RefreshFolderComparisonNode(tab.id, row.id);
+      updateTab(tab.id, { result });
+    } catch (err) {
+      failTab(tab.id, err);
+    }
   }
 
   function keySelectFolder(event, tab, rowIndex, row) {
@@ -1280,11 +1380,15 @@
 
   onMount(() => {
     unsubscribeFolderUpdates = EventsOn('folder-comparison:update', updateFolderNode);
+    unsubscribeFileChanges = EventsOn('file-comparison:changed', updateFileChange);
   });
 
   onDestroy(() => {
     if (typeof unsubscribeFolderUpdates === 'function') {
       unsubscribeFolderUpdates();
+    }
+    if (typeof unsubscribeFileChanges === 'function') {
+      unsubscribeFileChanges();
     }
   });
 
@@ -1294,10 +1398,10 @@
 <svelte:window on:beforeunload={preventDirtyExit} on:click={hideContext} />
 
 <main class="app-shell">
-  <nav class="tab-bar" aria-label="Open tabs">
+  <div class="tab-bar" aria-label="Open tabs" role="tablist">
     {#each tabs as tab}
       <div class:active={tab.id === activeTabID} class="tab">
-        <button class="tab-main" on:click={() => (activeTabID = tab.id)}>
+        <button class="tab-main" role="tab" aria-selected={tab.id === activeTabID} on:click={() => (activeTabID = tab.id)}>
           <span class="dirty">{tabDirty(tab) ? '•' : ''}</span>
           <span>{tab.title}</span>
           <span class="mode">{tabModeLabel(tab)}</span>
@@ -1306,7 +1410,7 @@
       </div>
     {/each}
     <button class="new-tab-button" aria-label="New tab" on:click={createSourceTab}>+</button>
-  </nav>
+  </div>
 
   {#if error}
     <div class="error-banner">{error}</div>
@@ -1579,6 +1683,24 @@
       <div class="path-strip">
         <span title={activeTab.leftPath}>{activeTab.leftPath}</span>
         <span title={activeTab.rightPath}>{activeTab.rightPath}</span>
+        <button
+          class="refresh-button"
+          title="Refresh comparison"
+          disabled={activeTab.loading || folderComparisonRunning(activeTab)}
+          on:click={refreshActive}
+        >{refreshLabel(activeTab)}</button>
+        {#if externalChangeSides(activeTab).length}
+          <div class="external-change-banner" role="alert">
+            <span>{externalChangeMessage(activeTab)}</span>
+            <div>
+              <button on:click={() => reloadExternalChanges(activeTab)}>Refresh from disk</button>
+              <button on:click={() => keepExternalEdits(activeTab)}>Keep my edits</button>
+              {#if tabDirty(activeTab)}
+                <button on:click={() => saveAfterExternalChange(activeTab)}>Save my edits</button>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
 
       {#if activeTab.loading}
@@ -1748,6 +1870,9 @@
       on:pointerdown|stopPropagation
     >
       {#if contextMenu.mode === 'folder'}
+        {#if rowIsFolder(contextMenu.row)}
+          <button disabled={folderComparisonRunning(getTab(contextMenu.tabID))} on:click={refreshContextFolder}>Refresh this folder</button>
+        {/if}
         {#if canCopyFolderFile(contextMenu.row, 'ltr')}
           <button on:click={() => copyFolder('ltr')}>Copy left to right</button>
         {/if}

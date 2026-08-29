@@ -228,6 +228,7 @@ export namespace compare {
 	export class FolderComparisonResult {
 	    leftRoot: string;
 	    rightRoot: string;
+	    revision: number;
 	    rows: FolderComparisonRow[];
 	
 	    static createFrom(source: any = {}) {
@@ -238,6 +239,7 @@ export namespace compare {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.leftRoot = source["leftRoot"];
 	        this.rightRoot = source["rightRoot"];
+	        this.revision = source["revision"];
 	        this.rows = this.convertValues(source["rows"], FolderComparisonRow);
 	    }
 	

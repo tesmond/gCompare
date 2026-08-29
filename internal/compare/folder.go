@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -15,23 +16,34 @@ import (
 )
 
 const recursiveFolderEntryLimit = 10000
+const fileCompareChunkSize = 1024 * 1024
+
+var fileCompareBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, fileCompareChunkSize)
+	},
+}
 
 type FolderComparisonUpdate struct {
-	TabID  string           `json:"tabID"`
-	NodeID string           `json:"nodeID"`
-	Status ComparisonStatus `json:"status"`
-	Error  string           `json:"error,omitempty"`
+	TabID    string           `json:"tabID"`
+	NodeID   string           `json:"nodeID"`
+	Revision uint64           `json:"revision"`
+	Status   ComparisonStatus `json:"status"`
+	Error    string           `json:"error,omitempty"`
 }
 
 type FolderSessionStore struct {
-	mu       sync.Mutex
-	sessions map[string]*folderSession
-	emit     func(FolderComparisonUpdate)
+	mu        sync.Mutex
+	sessions  map[string]*folderSession
+	revisions map[string]uint64
+	emit      func(FolderComparisonUpdate)
 }
 
 type folderSession struct {
 	mu        sync.Mutex
+	cacheMu   sync.RWMutex
 	id        string
+	revision  uint64
 	leftRoot  string
 	rightRoot string
 	nodes     []*folderNode
@@ -39,6 +51,7 @@ type folderSession struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	emit      func(FolderComparisonUpdate)
+	cache     map[string]cachedFolderStatus
 }
 
 type folderNode struct {
@@ -61,8 +74,16 @@ type folderCompareOutcome struct {
 	err    string
 }
 
+type cachedFolderStatus struct {
+	status ComparisonStatus
+	err    string
+}
+
 func NewFolderSessionStore() *FolderSessionStore {
-	return &FolderSessionStore{sessions: map[string]*folderSession{}}
+	return &FolderSessionStore{
+		sessions:  map[string]*folderSession{},
+		revisions: map[string]uint64{},
+	}
 }
 
 func (s *FolderSessionStore) SetUpdateEmitter(emit func(FolderComparisonUpdate)) {
@@ -79,10 +100,12 @@ func (s *FolderSessionStore) Open(tabID string, leftPath string, rightPath strin
 	if previous := s.sessions[tabID]; previous != nil {
 		previous.stop()
 	}
+	s.revisions[tabID]++
+	revision := s.revisions[tabID]
 	emit := s.emit
 	s.mu.Unlock()
 
-	session, result, err := newFolderSession(tabID, leftPath, rightPath, emit)
+	session, result, err := newFolderSession(tabID, revision, leftPath, rightPath, emit)
 	if err != nil {
 		return FolderComparisonResult{}, err
 	}
@@ -108,6 +131,16 @@ func (s *FolderSessionStore) Expand(tabID string, nodeID string) (FolderComparis
 	return session.expand(nodeID)
 }
 
+func (s *FolderSessionStore) RefreshNode(tabID string, nodeID string) (FolderComparisonResult, error) {
+	s.mu.Lock()
+	session := s.sessions[tabID]
+	s.mu.Unlock()
+	if session == nil {
+		return FolderComparisonResult{}, fmt.Errorf("folder comparison session not found: %s", tabID)
+	}
+	return session.refreshNode(nodeID)
+}
+
 func (s *FolderSessionStore) Close(tabID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,7 +151,7 @@ func (s *FolderSessionStore) Close(tabID string) {
 }
 
 func CompareFolder(leftPath string, rightPath string) (FolderComparisonResult, error) {
-	session, _, err := newFolderSession("", leftPath, rightPath, nil)
+	session, _, err := newFolderSession("", 0, leftPath, rightPath, nil)
 	if err != nil {
 		return FolderComparisonResult{}, err
 	}
@@ -126,7 +159,7 @@ func CompareFolder(leftPath string, rightPath string) (FolderComparisonResult, e
 	return session.result(), nil
 }
 
-func newFolderSession(tabID string, leftPath string, rightPath string, emit func(FolderComparisonUpdate)) (*folderSession, FolderComparisonResult, error) {
+func newFolderSession(tabID string, revision uint64, leftPath string, rightPath string, emit func(FolderComparisonUpdate)) (*folderSession, FolderComparisonResult, error) {
 	leftInfo, err := os.Stat(leftPath)
 	if err != nil {
 		return nil, FolderComparisonResult{}, fmt.Errorf("left folder: %w", err)
@@ -145,10 +178,12 @@ func newFolderSession(tabID string, leftPath string, rightPath string, emit func
 
 	session := &folderSession{
 		id:        tabID,
+		revision:  revision,
 		leftRoot:  leftPath,
 		rightRoot: rightPath,
 		byID:      map[string]*folderNode{},
 		emit:      emit,
+		cache:     map[string]cachedFolderStatus{},
 	}
 	children, err := session.buildTopLevelChildren(leftPath, rightPath)
 	if err != nil {
@@ -164,6 +199,7 @@ func (session *folderSession) initialResult() FolderComparisonResult {
 	return FolderComparisonResult{
 		LeftRoot:  session.leftRoot,
 		RightRoot: session.rightRoot,
+		Revision:  session.revision,
 		Rows:      session.rows(),
 	}
 }
@@ -174,6 +210,7 @@ func (session *folderSession) result() FolderComparisonResult {
 	return FolderComparisonResult{
 		LeftRoot:  session.leftRoot,
 		RightRoot: session.rightRoot,
+		Revision:  session.revision,
 		Rows:      session.rowsLocked(),
 	}
 }
@@ -187,8 +224,8 @@ func (session *folderSession) rows() []FolderComparisonRow {
 func (session *folderSession) rowsLocked() []FolderComparisonRow {
 	rows := make([]FolderComparisonRow, 0, len(session.nodes))
 	for index, node := range session.nodes {
-		node.row.RowIndex = index
 		row := node.row
+		row.RowIndex = index
 		rows = append(rows, row)
 	}
 	return rows
@@ -270,15 +307,38 @@ func (session *folderSession) newNode(parent *folderNode, left folderEntry, righ
 	if row.Name == "" {
 		row.Name = right.name
 	}
+	completed := false
 	if left.err != nil {
 		row.Status = StatusError
 		row.Error = fmt.Sprintf("left: %s", left.err)
+		completed = true
 	}
 	if right.err != nil {
 		row.Status = StatusError
 		row.Error = fmt.Sprintf("right: %s", right.err)
+		completed = true
 	}
-	return &folderNode{row: row}
+	if !completed {
+		switch {
+		case !row.LeftExists:
+			row.Status = StatusRightOnly
+			completed = true
+		case !row.RightExists:
+			row.Status = StatusLeftOnly
+			completed = true
+		case row.LeftType != row.RightType:
+			row.Status = StatusTypeMismatch
+			completed = true
+		}
+	}
+	if !completed {
+		if cached, ok := session.cachedStatus(row.ID); ok {
+			row.Status = cached.status
+			row.Error = cached.err
+			completed = true
+		}
+	}
+	return &folderNode{row: row, completed: completed}
 }
 
 func sortFolderEntryNames(names []string, leftEntries map[string]folderEntry, rightEntries map[string]folderEntry) {
@@ -404,7 +464,7 @@ func (session *folderSession) run(ctx context.Context, nodes []*folderNode) {
 					return
 				default:
 				}
-				outcome := compareFolderNode(node)
+				outcome := session.compareFolderNode(node)
 				select {
 				case outcomes <- outcome:
 				case <-ctx.Done():
@@ -417,7 +477,7 @@ func (session *folderSession) run(ctx context.Context, nodes []*folderNode) {
 	go func() {
 		defer close(jobs)
 		for _, node := range nodes {
-			if node.row.Status == StatusError {
+			if node.completed {
 				continue
 			}
 			select {
@@ -446,12 +506,12 @@ func (session *folderSession) expand(nodeID string) (FolderComparisonResult, err
 		return FolderComparisonResult{}, fmt.Errorf("folder node not found: %s", nodeID)
 	}
 	if !node.row.HasChildren {
-		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Rows: session.rowsLocked()}
+		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Revision: session.revision, Rows: session.rowsLocked()}
 		session.mu.Unlock()
 		return result, nil
 	}
 	if node.childrenLoaded {
-		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Rows: session.rowsLocked()}
+		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Revision: session.revision, Rows: session.rowsLocked()}
 		session.mu.Unlock()
 		return result, nil
 	}
@@ -470,7 +530,7 @@ func (session *folderSession) expand(nodeID string) (FolderComparisonResult, err
 
 	session.mu.Lock()
 	if node.childrenLoaded {
-		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Rows: session.rowsLocked()}
+		result := FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Revision: session.revision, Rows: session.rowsLocked()}
 		session.mu.Unlock()
 		return result, nil
 	}
@@ -486,7 +546,144 @@ func (session *folderSession) expand(nodeID string) (FolderComparisonResult, err
 	session.mu.Unlock()
 
 	session.startComparing(children)
-	return FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Rows: rows}, nil
+	return FolderComparisonResult{LeftRoot: session.leftRoot, RightRoot: session.rightRoot, Revision: session.revision, Rows: rows}, nil
+}
+
+func (session *folderSession) refreshNode(nodeID string) (FolderComparisonResult, error) {
+	session.mu.Lock()
+	node := session.byID[nodeID]
+	if node == nil {
+		session.mu.Unlock()
+		return FolderComparisonResult{}, fmt.Errorf("folder node not found: %s", nodeID)
+	}
+	if !folderEntryIsExpandable(folderEntry{exists: node.row.LeftExists, typ: node.row.LeftType}) &&
+		!folderEntryIsExpandable(folderEntry{exists: node.row.RightExists, typ: node.row.RightType}) {
+		session.mu.Unlock()
+		return FolderComparisonResult{}, fmt.Errorf("folder node is not refreshable: %s", nodeID)
+	}
+	for _, current := range session.nodes {
+		if !current.completed {
+			session.mu.Unlock()
+			return FolderComparisonResult{}, fmt.Errorf("wait for the current folder comparison to finish before refreshing")
+		}
+	}
+
+	loaded := map[string]bool{}
+	for _, current := range session.nodes {
+		if current.childrenLoaded && (current == node || strings.HasPrefix(current.row.ID, nodeID+"/")) {
+			loaded[current.row.ID] = true
+		}
+	}
+	leftExists := node.row.LeftExists && node.row.LeftType == EntryFolder
+	rightExists := node.row.RightExists && node.row.RightType == EntryFolder
+	leftDir := node.row.LeftPath
+	rightDir := node.row.RightPath
+	parentRel := filepath.FromSlash(node.row.ID)
+	childDepth := node.row.Depth + 1
+
+	kept := session.nodes[:0]
+	for _, current := range session.nodes {
+		if current != node && strings.HasPrefix(current.row.ID, nodeID+"/") {
+			delete(session.byID, current.row.ID)
+			continue
+		}
+		kept = append(kept, current)
+	}
+	session.nodes = kept
+	node.childrenLoaded = false
+	session.resetNodeStatusLocked(node)
+	session.mu.Unlock()
+
+	session.invalidateCachedSubtree(nodeID)
+
+	children := []*folderNode{}
+	if loaded[nodeID] {
+		var err error
+		children, err = session.buildLoadedDescendants(node, leftDir, rightDir, parentRel, childDepth, leftExists, rightExists, loaded)
+		if err != nil {
+			return FolderComparisonResult{}, err
+		}
+	}
+
+	session.mu.Lock()
+	insertAt := session.descendantEndIndexLocked(node) + 1
+	for index, child := range children {
+		session.byID[child.row.ID] = child
+		session.nodes = append(session.nodes, nil)
+		copy(session.nodes[insertAt+index+1:], session.nodes[insertAt+index:])
+		session.nodes[insertAt+index] = child
+	}
+	node.childrenLoaded = loaded[nodeID]
+	rows := session.rowsLocked()
+	session.mu.Unlock()
+
+	toCompare := make([]*folderNode, 0, len(children)+1)
+	toCompare = append(toCompare, node)
+	toCompare = append(toCompare, children...)
+	session.startComparing(toCompare)
+	return FolderComparisonResult{
+		LeftRoot:  session.leftRoot,
+		RightRoot: session.rightRoot,
+		Revision:  session.revision,
+		Rows:      rows,
+	}, nil
+}
+
+func (session *folderSession) buildLoadedDescendants(parent *folderNode, leftDir string, rightDir string, parentRel string, childDepth int, leftExists bool, rightExists bool, loaded map[string]bool) ([]*folderNode, error) {
+	children, err := session.buildChildNodes(parent, leftDir, rightDir, parentRel, childDepth, leftExists, rightExists)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*folderNode, 0, len(children))
+	for _, child := range children {
+		result = append(result, child)
+		if !loaded[child.row.ID] || !child.row.HasChildren {
+			continue
+		}
+		child.childrenLoaded = true
+		nested, err := session.buildLoadedDescendants(
+			child,
+			child.row.LeftPath,
+			child.row.RightPath,
+			filepath.FromSlash(child.row.ID),
+			child.row.Depth+1,
+			child.row.LeftExists && child.row.LeftType == EntryFolder,
+			child.row.RightExists && child.row.RightType == EntryFolder,
+			loaded,
+		)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, nested...)
+	}
+	return result, nil
+}
+
+func (session *folderSession) resetNodeStatusLocked(node *folderNode) {
+	node.row.Error = ""
+	node.row.Status = StatusPending
+	node.completed = false
+	switch {
+	case !node.row.LeftExists:
+		node.row.Status = StatusRightOnly
+		node.completed = true
+	case !node.row.RightExists:
+		node.row.Status = StatusLeftOnly
+		node.completed = true
+	case node.row.LeftType != node.row.RightType:
+		node.row.Status = StatusTypeMismatch
+		node.completed = true
+	}
+}
+
+func (session *folderSession) invalidateCachedSubtree(nodeID string) {
+	session.cacheMu.Lock()
+	for cachedID := range session.cache {
+		if cachedID == nodeID || strings.HasPrefix(cachedID, nodeID+"/") {
+			delete(session.cache, cachedID)
+		}
+	}
+	session.cacheMu.Unlock()
 }
 
 func (session *folderSession) descendantEndIndexLocked(node *folderNode) int {
@@ -509,13 +706,14 @@ func (session *folderSession) descendantEndIndexLocked(node *folderNode) int {
 	return index
 }
 
-func compareFolderNode(node *folderNode) folderCompareOutcome {
+func (session *folderSession) compareFolderNode(node *folderNode) folderCompareOutcome {
 	row := node.row
-	status, errText := compareFolderNodeStatus(row)
+	status, errText := session.compareFolderNodeStatus(row)
+	session.storeCachedStatus(row.ID, status, errText)
 	return folderCompareOutcome{node: node, status: status, err: errText}
 }
 
-func compareFolderNodeStatus(row FolderComparisonRow) (ComparisonStatus, string) {
+func (session *folderSession) compareFolderNodeStatus(row FolderComparisonRow) (ComparisonStatus, string) {
 	if row.Status == StatusError {
 		return StatusError, row.Error
 	}
@@ -540,7 +738,7 @@ func compareFolderNodeStatus(row FolderComparisonRow) (ComparisonStatus, string)
 		}
 		return StatusDifferent, ""
 	case EntryFolder:
-		equal, err := foldersEqual(row.LeftPath, row.RightPath)
+		equal, err := session.foldersEqualRecursive(row.LeftPath, row.RightPath, row.ID, 0)
 		if err != nil {
 			return StatusError, err.Error()
 		}
@@ -562,6 +760,22 @@ func compareFolderNodeStatus(row FolderComparisonRow) (ComparisonStatus, string)
 	default:
 		return StatusUnknown, ""
 	}
+}
+
+func (session *folderSession) cachedStatus(nodeID string) (cachedFolderStatus, bool) {
+	session.cacheMu.RLock()
+	defer session.cacheMu.RUnlock()
+	result, ok := session.cache[nodeID]
+	return result, ok
+}
+
+func (session *folderSession) storeCachedStatus(nodeID string, status ComparisonStatus, errText string) {
+	if nodeID == "" || status == StatusPending {
+		return
+	}
+	session.cacheMu.Lock()
+	session.cache[nodeID] = cachedFolderStatus{status: status, err: errText}
+	session.cacheMu.Unlock()
 }
 
 func (session *folderSession) applyOutcome(outcome folderCompareOutcome) {
@@ -589,10 +803,11 @@ func (session *folderSession) setNodeStatusLocked(node *folderNode, status Compa
 	node.row.Status = status
 	node.row.Error = errText
 	return []FolderComparisonUpdate{{
-		TabID:  session.id,
-		NodeID: node.row.ID,
-		Status: status,
-		Error:  errText,
+		TabID:    session.id,
+		NodeID:   node.row.ID,
+		Revision: session.revision,
+		Status:   status,
+		Error:    errText,
 	}}
 }
 
@@ -620,11 +835,7 @@ func symlinksEqual(leftPath string, rightPath string) (bool, error) {
 	return leftTarget == rightTarget, nil
 }
 
-func foldersEqual(leftPath string, rightPath string) (bool, error) {
-	return foldersEqualRecursive(leftPath, rightPath, 0)
-}
-
-func foldersEqualRecursive(leftPath string, rightPath string, seen int) (bool, error) {
+func (session *folderSession) foldersEqualRecursive(leftPath string, rightPath string, nodeID string, seen int) (bool, error) {
 	if seen > recursiveFolderEntryLimit {
 		return false, fmt.Errorf("folder comparison exceeded %d entries", recursiveFolderEntryLimit)
 	}
@@ -645,18 +856,31 @@ func foldersEqualRecursive(leftPath string, rightPath string, seen int) (bool, e
 		leftByName[entry.Name()] = entry
 	}
 	for _, rightEntry := range rightEntries {
+		childID := path.Join(nodeID, rightEntry.Name())
 		leftEntry, ok := leftByName[rightEntry.Name()]
 		if !ok {
+			session.storeCachedStatus(childID, StatusRightOnly, "")
 			return false, nil
 		}
 		leftType := entryType(leftEntry)
 		rightType := entryType(rightEntry)
 		if leftType != rightType {
+			session.storeCachedStatus(childID, StatusTypeMismatch, "")
 			return false, nil
 		}
 		leftChild := filepath.Join(leftPath, rightEntry.Name())
 		rightChild := filepath.Join(rightPath, rightEntry.Name())
-		equal, err := entriesEqual(leftChild, rightChild, leftType, seen+len(leftEntries)+len(rightEntries))
+		equal, err := session.entriesEqual(leftChild, rightChild, childID, leftType, seen+len(leftEntries)+len(rightEntries))
+		status := StatusEqual
+		errText := ""
+		if !equal {
+			status = StatusDifferent
+		}
+		if err != nil {
+			status = StatusError
+			errText = err.Error()
+		}
+		session.storeCachedStatus(childID, status, errText)
 		if err != nil || !equal {
 			return equal, err
 		}
@@ -664,12 +888,12 @@ func foldersEqualRecursive(leftPath string, rightPath string, seen int) (bool, e
 	return true, nil
 }
 
-func entriesEqual(leftPath string, rightPath string, typ EntryType, seen int) (bool, error) {
+func (session *folderSession) entriesEqual(leftPath string, rightPath string, nodeID string, typ EntryType, seen int) (bool, error) {
 	switch typ {
 	case EntryFile:
 		return filesEqual(leftPath, rightPath)
 	case EntryFolder:
-		return foldersEqualRecursive(leftPath, rightPath, seen)
+		return session.foldersEqualRecursive(leftPath, rightPath, nodeID, seen)
 	case EntrySymlink:
 		return symlinksEqual(leftPath, rightPath)
 	default:
@@ -707,9 +931,10 @@ func sameFileBytes(leftPath string, rightPath string) (bool, error) {
 	}
 	defer right.Close()
 
-	const chunkSize = 1024 * 1024
-	leftBuffer := make([]byte, chunkSize)
-	rightBuffer := make([]byte, chunkSize)
+	leftBuffer := fileCompareBufferPool.Get().([]byte)
+	rightBuffer := fileCompareBufferPool.Get().([]byte)
+	defer fileCompareBufferPool.Put(leftBuffer)
+	defer fileCompareBufferPool.Put(rightBuffer)
 	for {
 		leftN, leftErr := io.ReadFull(left, leftBuffer)
 		rightN, rightErr := io.ReadFull(right, rightBuffer)

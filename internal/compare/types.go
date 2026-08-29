@@ -46,6 +46,7 @@ const (
 type FolderComparisonResult struct {
 	LeftRoot  string                `json:"leftRoot"`
 	RightRoot string                `json:"rightRoot"`
+	Revision  uint64                `json:"revision"`
 	Rows      []FolderComparisonRow `json:"rows"`
 }
 

@@ -9,6 +9,7 @@
   export let rightText = '';
   export let rows = [];
   export let selectedRange = null;
+  export let readOnly = false;
   export let onChange = () => {};
   export let onSelectRange = () => {};
   export let onContextMenu = () => {};
@@ -137,6 +138,7 @@
       decorationField(side),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorState.tabSize.of(2),
+      EditorState.readOnly.of(readOnly),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !suppressChange) {
           onChange(side, update.state.doc.toString());

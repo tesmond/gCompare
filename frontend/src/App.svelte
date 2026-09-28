@@ -15,6 +15,7 @@
   let pendingClose = null;
   let textCompareRequests = {};
   let fileEditTimers = {};
+  let gitCompareRequests = {};
   let shiftAnchor = null;
   let leftComparePane;
   let centerComparePane;
@@ -113,6 +114,7 @@
 
   function tabModeLabel(tab) {
     if (tab?.mode === 'new' && hasTextComparison(tab)) return 'text';
+    if (tab?.mode === 'git') return 'history';
     return tab?.mode === 'new' ? 'new' : tab?.mode || '';
   }
 
@@ -228,8 +230,198 @@
     }
   }
 
+  function gitTitle(path) {
+    return `History: ${basename(path)}`;
+  }
+
+  function gitRevisions(tab) {
+    return tab?.history?.revisions || [];
+  }
+
+  function gitRevisionKey(revision) {
+    if (!revision) return '';
+    return revision.kind === 'commit' ? `commit:${revision.hash}` : revision.kind;
+  }
+
+  function gitMaxRightIndex(tab, locked = tab?.locked) {
+    const count = gitRevisions(tab).length;
+    return Math.max(0, locked ? count - 2 : count - 1);
+  }
+
+  async function openGitHistory(path = '', options = {}) {
+    error = '';
+    let targetID = options.tabID || '';
+    try {
+      const chosen = path || (await backend().ChooseFile());
+      if (!chosen) return;
+      targetID = targetID || newID();
+      const tab = {
+        id: targetID,
+        mode: 'git',
+        title: gitTitle(chosen),
+        path: chosen,
+        history: null,
+        rightIndex: 0,
+        leftIndex: 1,
+        locked: true,
+        result: null,
+        loading: true,
+        comparing: false,
+        error: '',
+        selectionStart: null,
+        selectionEnd: null
+      };
+      if (options.tabID) {
+        tabs = tabs.map((item) => (item.id === tab.id ? tab : item));
+      } else {
+        tabs = [...tabs, tab];
+      }
+      activeTabID = tab.id;
+      const history = await backend().GitFileHistory(chosen);
+      updateTab(tab.id, { history, path: history.path, title: gitTitle(history.path) });
+      await loadGitComparison(tab.id, 0, 1);
+    } catch (err) {
+      if (targetID) {
+        failTab(targetID, err);
+      } else {
+        error = err?.message || String(err);
+      }
+    }
+  }
+
+  async function loadGitComparison(tabID, rightIndex, leftIndex) {
+    const tab = getTab(tabID);
+    const revisions = gitRevisions(tab);
+    if (tab?.mode !== 'git' || !revisions.length) return;
+    const right = revisions[rightIndex];
+    const left = revisions[leftIndex];
+    if (!right || !left) return;
+
+    const requestID = (gitCompareRequests[tabID] || 0) + 1;
+    gitCompareRequests = { ...gitCompareRequests, [tabID]: requestID };
+    updateTab(tabID, { rightIndex, leftIndex, comparing: true, error: '' });
+    try {
+      const result = await backend().CompareGitRevisions(tab.history.repoRoot, left, right);
+      if (gitCompareRequests[tabID] !== requestID) return;
+      updateTab(tabID, {
+        result,
+        loading: false,
+        comparing: false,
+        error: '',
+        selectionStart: null,
+        selectionEnd: null
+      });
+    } catch (err) {
+      if (gitCompareRequests[tabID] !== requestID) return;
+      updateTab(tabID, { comparing: false });
+      failTab(tabID, err);
+    }
+  }
+
+  function canStepGitRevision(tab, side, direction) {
+    const count = gitRevisions(tab).length;
+    if (!count || tab.loading) return false;
+    if (side === 'left') {
+      if (tab.locked) return false;
+      return direction === 'older' ? tab.leftIndex < count - 1 : tab.leftIndex > 0;
+    }
+    return direction === 'older' ? tab.rightIndex < gitMaxRightIndex(tab) : tab.rightIndex > 0;
+  }
+
+  function stepGitRevision(tab, side, direction) {
+    if (!canStepGitRevision(tab, side, direction)) return;
+    const delta = direction === 'older' ? 1 : -1;
+    if (side === 'left') {
+      loadGitComparison(tab.id, tab.rightIndex, tab.leftIndex + delta);
+      return;
+    }
+    const rightIndex = tab.rightIndex + delta;
+    const leftIndex = tab.locked ? rightIndex + 1 : tab.leftIndex;
+    loadGitComparison(tab.id, rightIndex, leftIndex);
+  }
+
+  function toggleGitLock(tab) {
+    if (!tab || tab.mode !== 'git') return;
+    const locked = !tab.locked;
+    updateTab(tab.id, { locked });
+    if (!locked) return;
+    const rightIndex = Math.min(tab.rightIndex, gitMaxRightIndex(tab, true));
+    const leftIndex = rightIndex + 1;
+    if (rightIndex !== tab.rightIndex || leftIndex !== tab.leftIndex) {
+      loadGitComparison(tab.id, rightIndex, leftIndex);
+    }
+  }
+
+  async function refreshGitHistory(tab) {
+    if (!tab || tab.mode !== 'git') return;
+    error = '';
+    const previous = gitRevisions(tab);
+    const rightKey = gitRevisionKey(previous[tab.rightIndex]);
+    const leftKey = gitRevisionKey(previous[tab.leftIndex]);
+    const rightWasNewest = tab.rightIndex === 0;
+    updateTab(tab.id, { comparing: true, error: '' });
+    try {
+      const history = await backend().GitFileHistory(tab.path);
+      const current = getTab(tab.id);
+      if (!current) return;
+      const revisions = history.revisions || [];
+      const indexFor = (key, fallback) => {
+        const index = revisions.findIndex((revision) => gitRevisionKey(revision) === key);
+        return index === -1 ? fallback : index;
+      };
+      const maxRight = Math.max(0, current.locked ? revisions.length - 2 : revisions.length - 1);
+      const rightIndex = rightWasNewest ? 0 : Math.min(indexFor(rightKey, 0), maxRight);
+      const leftIndex = current.locked ? rightIndex + 1 : Math.min(indexFor(leftKey, rightIndex + 1), revisions.length - 1);
+      updateTab(tab.id, { history, loading: false });
+      await loadGitComparison(tab.id, rightIndex, leftIndex);
+    } catch (err) {
+      updateTab(tab.id, { comparing: false });
+      failTab(tab.id, err);
+    }
+  }
+
+  function gitRevisionName(revision) {
+    if (!revision) return '';
+    if (revision.kind === 'working') return 'Working copy';
+    if (revision.kind === 'empty') return 'Empty file';
+    return revision.shortHash;
+  }
+
+  function gitRevisionDate(revision) {
+    if (!revision?.date) return revision?.kind === 'empty' ? 'No earlier revision' : '';
+    const date = new Date(revision.date);
+    if (Number.isNaN(date.getTime())) return revision.date;
+    return date.toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+
+  function gitRevisionTooltip(revision) {
+    if (!revision) return '';
+    const parts = [];
+    if (revision.kind === 'commit') parts.push(revision.hash);
+    if (revision.subject) parts.push(revision.subject);
+    if (revision.author) parts.push(`by ${revision.author}`);
+    if (revision.path) parts.push(revision.path);
+    return parts.join('\n');
+  }
+
+  function gitRevisionPosition(tab, index) {
+    const count = gitRevisions(tab).length;
+    if (!count) return '';
+    return `${count - 1 - index}/${count - 1}`;
+  }
+
   async function refreshActive() {
     if (!activeTab) return;
+    if (activeTab.mode === 'git') {
+      await refreshGitHistory(activeTab);
+      return;
+    }
     error = '';
     updateTab(activeTab.id, { loading: true, error: '' });
     try {
@@ -689,7 +881,7 @@
   }
 
   async function showEditorContext(tab, details) {
-    if (!tab || tab.mode !== 'file' || !details?.row) return;
+    if (!tab || (tab.mode !== 'file' && tab.mode !== 'git') || !details?.row) return;
     contextMenu = {
       x: details.x,
       y: details.y,
@@ -1452,6 +1644,12 @@
             <button on:click={() => selectWithNativeDialog('right', 'folder')}>Choose right folder</button>
             <button on:click={() => selectWithNativeDialog('right', 'file')}>Choose right file</button>
           </div>
+          <div>
+            <button class="git-open-button" title="Browse the git revisions of a single file" on:click={() => openGitHistory('', { tabID: sourceTab.id })}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3a3 3 0 0 1 1 5.83v6.34A3 3 0 1 1 5 15.17V8.83A3 3 0 0 1 6 3Zm12 3a3 3 0 0 1 1 5.83V13a4 4 0 0 1-4 4h-3.17l1.58 1.59L12 20l-4-4 4-4 1.41 1.41L11.83 15H15a2 2 0 0 0 2-2v-1.17A3 3 0 0 1 18 6Z"/></svg>
+              Git file history
+            </button>
+          </div>
         </div>
         {#if sourceTab.textComparison.error}
           <div class="error-banner">{sourceTab.textComparison.error}</div>
@@ -1577,6 +1775,9 @@
                     <span class="entry-name" title={entry.path}>{entry.name}</span>
                     <span class="entry-type">{typeLabel(entry.type)}</span>
                   </button>
+                  {#if entry.type === 'file'}
+                    <button class="entry-history-button" title="Show git history of this file" on:click={() => openGitHistory(entry.path)}>History</button>
+                  {/if}
                   <button
                     on:click={() => entry.type === 'folder' ? selectFolderSource('left', entry.path) : selectFileSource('left', entry.path)}
                     disabled={!canSelectType(entry.type)}
@@ -1646,6 +1847,9 @@
                     <span class="entry-name" title={entry.path}>{entry.name}</span>
                     <span class="entry-type">{typeLabel(entry.type)}</span>
                   </button>
+                  {#if entry.type === 'file'}
+                    <button class="entry-history-button" title="Show git history of this file" on:click={() => openGitHistory(entry.path)}>History</button>
+                  {/if}
                   <button
                     on:click={() => entry.type === 'folder' ? selectFolderSource('right', entry.path) : selectFileSource('right', entry.path)}
                     disabled={!canSelectType(entry.type)}
@@ -1704,6 +1908,112 @@
       {/if}
     </section>
     {/if}
+  {:else if activeTab.mode === 'git'}
+    <section class="comparison git-comparison">
+      <div class="path-strip git-path-strip">
+        <span class="git-file-path" title={activeTab.path}>
+          {activeTab.history?.relativePath || activeTab.path}
+          {#if activeTab.history}
+            <span class="git-repo-meta">in {basename(activeTab.history.repoRoot)}{activeTab.history.branch ? ` · ${activeTab.history.branch}` : ''}</span>
+          {/if}
+        </span>
+        <div class="difference-nav" aria-label="Difference navigation">
+          {#if activeTab.result}
+            <span class="difference-count" title={differenceLabel(activeTab)}>{differenceLabel(activeTab)}</span>
+            <button class="icon-button" aria-label="Previous difference" title="Previous difference" disabled={!differenceCount(activeTab)} on:click={() => navigateDifference('previous')}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5 5 12h4v7h6v-7h4L12 5Z"/></svg>
+            </button>
+            <button class="icon-button" aria-label="Next difference" title="Next difference" disabled={!differenceCount(activeTab)} on:click={() => navigateDifference('next')}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19 5 12h4V5h6v7h4l-7 7Z"/></svg>
+            </button>
+          {/if}
+        </div>
+        <button class="refresh-button" title="Reload the file's git history" disabled={activeTab.loading || activeTab.comparing} on:click={refreshActive}>Refresh</button>
+      </div>
+
+      {#if activeTab.loading && !activeTab.history}
+        <div class="loading">Loading history…</div>
+      {:else if activeTab.error && !activeTab.result}
+        <div class="error-panel">{activeTab.error}</div>
+      {:else}
+        {#if activeTab.error}
+          <div class="warning-banner">{activeTab.error}</div>
+        {/if}
+        <div class="git-revision-header" class:comparing={activeTab.comparing}>
+          {#each ['left', 'right'] as side}
+            {@const index = side === 'left' ? activeTab.leftIndex : activeTab.rightIndex}
+            {@const revision = gitRevisions(activeTab)[index]}
+            <div class={`git-revision-bar git-revision-bar-${side}`} class:locked-side={side === 'left' && activeTab.locked}>
+              <button
+                class="icon-button git-step-button"
+                aria-label={`Older ${side} revision`}
+                title={side === 'left' && activeTab.locked ? 'Unlock to move the left revision' : 'Older revision'}
+                disabled={!canStepGitRevision(activeTab, side, 'older')}
+                on:click={() => stepGitRevision(activeTab, side, 'older')}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12l6.6-6.6Z"/></svg>
+              </button>
+              <div class="git-revision-info" title={gitRevisionTooltip(revision)}>
+                <span class={`git-revision-name git-kind-${revision?.kind || 'none'}`}>{gitRevisionName(revision)}</span>
+                <span class="git-revision-date">{gitRevisionDate(revision)}</span>
+                {#if revision?.subject}
+                  <span class="git-revision-subject">{revision.subject}</span>
+                {/if}
+              </div>
+              <span class="git-revision-position" title="Revision number, oldest first">{gitRevisionPosition(activeTab, index)}</span>
+              <button
+                class="icon-button git-step-button"
+                aria-label={`Newer ${side} revision`}
+                title={side === 'left' && activeTab.locked ? 'Unlock to move the left revision' : 'Newer revision'}
+                disabled={!canStepGitRevision(activeTab, side, 'newer')}
+                on:click={() => stepGitRevision(activeTab, side, 'newer')}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 5.4 10 4l8 8-8 8-1.4-1.4 6.6-6.6-6.6-6.6Z"/></svg>
+              </button>
+              {#if side === 'left'}
+                <button
+                  class="git-lock-button"
+                  class:active={activeTab.locked}
+                  aria-pressed={activeTab.locked}
+                  title={activeTab.locked ? 'Left follows one revision behind the right. Click to unlock.' : 'Lock the left panel to one revision behind the right'}
+                  on:click={() => toggleGitLock(activeTab)}
+                >
+                  {#if activeTab.locked}
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h1Zm2 0h6V7a3 3 0 0 0-6 0v3Z"/></svg>
+                    Locked to previous
+                  {:else}
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 10h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V11a1 1 0 0 1 1-1h1V7a5 5 0 0 1 9.58-2l-1.84.78A3 3 0 0 0 9 7v3Z"/></svg>
+                    Lock to previous
+                  {/if}
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+        <div class="code-diff-body">
+          {#key activeTab.id}
+            <DiffEditor
+              bind:this={diffEditor}
+              readOnly={true}
+              leftText={sideTextFromRows(activeTab.result, 'left').join('\n')}
+              rightText={sideTextFromRows(activeTab.result, 'right').join('\n')}
+              rows={comparisonRows(activeTab)}
+              selectedRange={selectedFileRange(activeTab)}
+              onSelectRange={(range) => selectEditorRange(activeTab, range)}
+              onContextMenu={(details) => showEditorContext(activeTab, details)}
+              onViewportChange={updateEditorViewport}
+            />
+          {/key}
+          <div class="diff-map-gutter" aria-label="Difference overview">
+            {#each comparisonRows(activeTab) as row}
+              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {/each}
+            <div class="diff-map-window" style={viewportWindowStyle(activeTab)}></div>
+            <div class="diff-map-focus" style={focusIndicatorStyle(activeTab)}></div>
+          </div>
+        </div>
+      {/if}
+    </section>
   {:else}
     <section class="comparison">
       <div class="path-strip">
@@ -1917,6 +2227,9 @@
         {#if !hasFolderMenuActions(contextMenu.row)}
           <button disabled>No file actions</button>
         {/if}
+      {:else if contextMenu.mode === 'git'}
+        <button on:click={copySelectedText}>Copy text</button>
+        <button on:click={() => reveal(getTab(contextMenu.tabID)?.path)}>Show file in folder</button>
       {:else}
         <button on:click={() => copyLines('ltr')}>Copy selected line(s) left to right</button>
         <button on:click={() => copyLines('rtl')}>Copy selected line(s) right to left</button>

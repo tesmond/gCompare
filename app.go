@@ -87,6 +87,14 @@ func (a *App) OpenFileComparison(tabID string, leftPath string, rightPath string
 	return a.sessions.Open(tabID, leftPath, rightPath)
 }
 
+func (a *App) GitFileHistory(path string) (compare.GitFileHistory, error) {
+	return compare.LoadGitFileHistory(path)
+}
+
+func (a *App) CompareGitRevisions(repoRoot string, left compare.GitRevision, right compare.GitRevision) (compare.FileComparisonResult, error) {
+	return compare.CompareGitRevisions(repoRoot, left, right)
+}
+
 func (a *App) CompareText(leftText string, rightText string) compare.FileComparisonResult {
 	return compare.CompareText(leftText, rightText)
 }

@@ -30,6 +30,10 @@ export function CloseFolderComparison(arg1) {
   return window['go']['main']['App']['CloseFolderComparison'](arg1);
 }
 
+export function CompareGitRevisions(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CompareGitRevisions'](arg1, arg2, arg3);
+}
+
 export function CompareText(arg1, arg2) {
   return window['go']['main']['App']['CompareText'](arg1, arg2);
 }
@@ -48,6 +52,10 @@ export function DiscardFileChanges(arg1) {
 
 export function ExpandFolderComparisonNode(arg1, arg2) {
   return window['go']['main']['App']['ExpandFolderComparisonNode'](arg1, arg2);
+}
+
+export function GitFileHistory(arg1) {
+  return window['go']['main']['App']['GitFileHistory'](arg1);
 }
 
 export function HomeDirectory() {

@@ -16,6 +16,8 @@ export function CloseFileComparison(arg1:string):Promise<void>;
 
 export function CloseFolderComparison(arg1:string):Promise<void>;
 
+export function CompareGitRevisions(arg1:string,arg2:compare.GitRevision,arg3:compare.GitRevision):Promise<compare.FileComparisonResult>;
+
 export function CompareText(arg1:string,arg2:string):Promise<compare.FileComparisonResult>;
 
 export function CopyFileLeftToRight(arg1:string,arg2:string,arg3:boolean):Promise<void>;
@@ -25,6 +27,8 @@ export function CopyFileRightToLeft(arg1:string,arg2:string,arg3:boolean):Promis
 export function DiscardFileChanges(arg1:string):Promise<compare.FileComparisonResult>;
 
 export function ExpandFolderComparisonNode(arg1:string,arg2:string):Promise<compare.FolderComparisonResult>;
+
+export function GitFileHistory(arg1:string):Promise<compare.GitFileHistory>;
 
 export function HomeDirectory():Promise<string>;
 

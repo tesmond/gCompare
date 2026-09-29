@@ -1146,6 +1146,11 @@ button:disabled {
   white-space: pre !important;
 }
 
+.code-diff-editor .cm-editor .cm-content {
+  padding-bottom: calc(4px + var(--gc-extra-bottom, 0px));
+  padding-right: var(--gc-extra-right, 0px);
+}
+
 .code-diff-editor .cm-gutters {
   background: #f6f8fa;
   border-right-color: #d0d7de;

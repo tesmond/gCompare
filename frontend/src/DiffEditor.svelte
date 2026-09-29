@@ -26,6 +26,25 @@
   let scrollRangeFrame = 0;
 
   const setRowsEffect = StateEffect.define();
+  const setExtraSpaceEffect = StateEffect.define();
+
+  // Extra space added to the shorter/narrower editor so both editors have the
+  // same scroll range and linked scrolling can reach the end of either side.
+  // It is applied through CodeMirror's content attributes (as CSS variables
+  // used by app.css) so CodeMirror measures it rather than fighting it.
+  const extraSpaceField = StateField.define({
+    create: () => ({ right: 0, bottom: 0 }),
+    update(value, transaction) {
+      for (const effect of transaction.effects) {
+        if (effect.is(setExtraSpaceEffect)) value = effect.value;
+      }
+      return value;
+    },
+    provide: (field) =>
+      EditorView.contentAttributes.from(field, (value) => ({
+        style: `--gc-extra-right: ${value.right}px; --gc-extra-bottom: ${value.bottom}px`
+      }))
+  });
 
   function segmentIsDiff(segment) {
     return segment?.isDiffToken ?? segment?.changed;
@@ -136,6 +155,7 @@
       history(),
       drawSelection(),
       decorationField(side),
+      extraSpaceField,
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorState.tabSize.of(2),
       EditorState.readOnly.of(readOnly),
@@ -145,6 +165,9 @@
         }
         if (update.selectionSet && !suppressSelection) {
           emitSelection(side, update.view);
+        }
+        if (update.docChanged || update.geometryChanged) {
+          scheduleEqualScrollRanges();
         }
       })
     ];
@@ -269,30 +292,39 @@
     handleWheel(event, rightView);
   }
 
+  function naturalHeight(view) {
+    // Document height from CodeMirror's height map; independent of padding.
+    return view.lineBlockAt(view.state.doc.length).bottom;
+  }
+
+  function naturalWidth(view) {
+    return view.scrollDOM.scrollWidth - view.state.field(extraSpaceField).right;
+  }
+
+  function equalizeScrollRanges() {
+    if (!leftView || !rightView) return;
+    const views = [leftView, rightView];
+    const heights = views.map(naturalHeight);
+    const widths = views.map(naturalWidth);
+    const maximumHeight = Math.max(...heights);
+    const maximumWidth = Math.max(...widths);
+    views.forEach((view, index) => {
+      const next = {
+        right: Math.max(0, Math.round(maximumWidth - widths[index])),
+        bottom: Math.max(0, Math.round(maximumHeight - heights[index]))
+      };
+      const current = view.state.field(extraSpaceField);
+      if (Math.abs(current.right - next.right) > 1 || Math.abs(current.bottom - next.bottom) > 1) {
+        view.dispatch({ effects: setExtraSpaceEffect.of(next) });
+      }
+    });
+    syncLinkedScrollPosition(scrollDOMs(), leftView.scrollDOM);
+  }
+
   function scheduleEqualScrollRanges() {
     if (!leftView || !rightView) return;
     cancelAnimationFrame(scrollRangeFrame);
-    scrollRangeFrame = requestAnimationFrame(() => {
-      const views = [leftView, rightView].filter(Boolean);
-      for (const view of views) {
-        view.contentDOM.style.paddingRight = '';
-        view.contentDOM.style.paddingBottom = '';
-      }
-
-      const widths = views.map((view) => view.scrollDOM.scrollWidth);
-      const heights = views.map((view) => view.scrollDOM.scrollHeight);
-      const maximumWidth = Math.max(...widths);
-      const maximumHeight = Math.max(...heights);
-      for (let index = 0; index < views.length; index++) {
-        const view = views[index];
-        const computed = getComputedStyle(view.contentDOM);
-        const baseRight = Number.parseFloat(computed.paddingRight) || 0;
-        const baseBottom = Number.parseFloat(computed.paddingBottom) || 0;
-        view.contentDOM.style.paddingRight = `${baseRight + maximumWidth - widths[index]}px`;
-        view.contentDOM.style.paddingBottom = `${baseBottom + maximumHeight - heights[index]}px`;
-      }
-      syncLinkedScrollPosition(scrollDOMs(), leftView.scrollDOM);
-    });
+    scrollRangeFrame = requestAnimationFrame(equalizeScrollRanges);
   }
 
   function editorForTarget(target) {

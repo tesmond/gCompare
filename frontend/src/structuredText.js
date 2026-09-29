@@ -127,34 +127,118 @@ class PythonLiteralParser {
   parseValue() {
     this.skipWhitespace();
     const character = this.source[this.index];
-    if (character === '{') return this.parseDictionary();
+    if (character === '{') return this.parseBrace();
     if (character === '[') return this.parseSequence('[', ']', 'list');
     if (character === '(') return this.parseSequence('(', ')', 'tuple');
+    if (character === '<') return this.parseAngle();
+    if (this.source.startsWith('...', this.index)) {
+      this.index += 3;
+      return { type: 'constant', value: '...' };
+    }
+    if (/^[bBrRuU]{1,2}['"]/.test(this.source.slice(this.index, this.index + 3))) return this.parsePrefixedString();
     if (character === "'" || character === '"') return this.parseString();
+    if ((character === '+' || character === '-') && /[A-Za-z_]/.test(this.source[this.index + 1] || '')) {
+      this.index++;
+      const identifier = this.parseIdentifier();
+      return { type: 'constant', value: `${character}${identifier.value}` };
+    }
     if (character === '+' || character === '-' || character === '.' || /\d/.test(character || '')) {
       return this.parseNumber();
     }
     return this.parseIdentifier();
   }
 
-  parseDictionary() {
+  parseBrace() {
     this.expect('{');
-    const entries = [];
     this.skipWhitespace();
-    if (this.consume('}')) return { type: 'dict', entries };
+    if (this.consume('}')) return { type: 'dict', entries: [] };
+    const first = this.parseValue();
+    this.skipWhitespace();
+    if (!this.consume(':')) return this.parseSetRest(first);
+    const entries = [{ key: first, value: this.parseValue() }];
     while (true) {
-      const key = this.parseValue();
-      this.skipWhitespace();
-      this.expect(':');
-      const value = this.parseValue();
-      entries.push({ key, value });
       this.skipWhitespace();
       if (this.consume('}')) break;
       this.expect(',');
       this.skipWhitespace();
       if (this.consume('}')) break;
+      const key = this.parseValue();
+      this.skipWhitespace();
+      this.expect(':');
+      entries.push({ key, value: this.parseValue() });
     }
     return { type: 'dict', entries };
+  }
+
+  parseSetRest(first) {
+    const values = [first];
+    while (true) {
+      this.skipWhitespace();
+      if (this.consume('}')) break;
+      this.expect(',');
+      this.skipWhitespace();
+      if (this.consume('}')) break;
+      values.push(this.parseValue());
+    }
+    return { type: 'set', values };
+  }
+
+  // Opaque reprs such as <Status.ACTIVE: 'active'> or <Foo object at 0x10>.
+  parseAngle() {
+    const start = this.index;
+    let depth = 0;
+    while (this.index < this.source.length) {
+      const character = this.source[this.index++];
+      if (character === "'" || character === '"') {
+        this.skipQuoted(character);
+      } else if (character === '<') {
+        depth++;
+      } else if (character === '>') {
+        depth--;
+        if (depth === 0) return { type: 'constant', value: this.source.slice(start, this.index) };
+      }
+    }
+    this.fail('Unterminated <...> value');
+  }
+
+  skipQuoted(quote) {
+    while (this.index < this.source.length) {
+      const character = this.source[this.index++];
+      if (character === '\\') this.index++;
+      else if (character === quote) return;
+    }
+    this.fail('Unterminated string');
+  }
+
+  // b'..' and r'..' literals are kept verbatim so escapes are not altered.
+  parsePrefixedString() {
+    const start = this.index;
+    const prefix = this.source.slice(start).match(/^[bBrRuU]{1,2}/)[0];
+    this.index += prefix.length;
+    if (!/[bBrR]/.test(prefix)) return this.parseString();
+    const quote = this.source[this.index++];
+    this.skipQuoted(quote);
+    return { type: 'constant', value: this.source.slice(start, this.index) };
+  }
+
+  parseCall(name) {
+    this.expect('(');
+    const args = [];
+    while (true) {
+      this.skipWhitespace();
+      if (this.consume(')')) break;
+      const keyword = this.source.slice(this.index).match(/^([A-Za-z_]\w*)\s*=(?!=)/);
+      let argumentName = '';
+      if (keyword) {
+        argumentName = keyword[1];
+        this.index += keyword[0].length;
+      }
+      args.push({ name: argumentName, value: this.parseValue() });
+      this.skipWhitespace();
+      if (this.consume(')')) break;
+      this.expect(',');
+    }
+    return { type: 'call', name, args };
   }
 
   parseSequence(open, close, type) {
@@ -227,13 +311,11 @@ class PythonLiteralParser {
   }
 
   parseIdentifier() {
-    const match = this.source.slice(this.index).match(/^[A-Za-z_]\w*/);
+    const match = this.source.slice(this.index).match(/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/);
     if (!match) this.fail('Expected a Python literal');
     this.index += match[0].length;
-    if (match[0] === 'True' || match[0] === 'False' || match[0] === 'None') {
-      return { type: 'constant', value: match[0] };
-    }
-    this.fail(`Unsupported expression ${match[0]}`);
+    if (this.source[this.index] === '(') return this.parseCall(match[0]);
+    return { type: 'constant', value: match[0] };
   }
 
   skipWhitespace() {
@@ -293,6 +375,15 @@ function formatPython(node, level = 0) {
 
   const indentation = '  '.repeat(level);
   const childIndentation = '  '.repeat(level + 1);
+  if (node.type === 'call') {
+    if (!node.args.length) return `${node.name}()`;
+    const label = (argument) => (argument.name ? `${argument.name}=` : '');
+    const rendered = node.args.map((argument) => label(argument) + formatPython(argument.value, level + 1));
+    const inline = `${node.name}(${rendered.join(', ')})`;
+    if (!inline.includes('\n') && inline.length <= 100) return inline;
+    return `${node.name}(\n${rendered.map((text) => `${childIndentation}${text}`).join(',\n')}\n${indentation})`;
+  }
+
   if (node.type === 'dict') {
     if (!node.entries.length) return '{}';
     const entries = node.entries.map(
@@ -301,8 +392,8 @@ function formatPython(node, level = 0) {
     return `{\n${entries.join(',\n')}\n${indentation}}`;
   }
 
-  const open = node.type === 'tuple' ? '(' : '[';
-  const close = node.type === 'tuple' ? ')' : ']';
+  const open = node.type === 'tuple' ? '(' : node.type === 'set' ? '{' : '[';
+  const close = node.type === 'tuple' ? ')' : node.type === 'set' ? '}' : ']';
   if (!node.values.length) return `${open}${close}`;
   const values = node.values.map((value) => `${childIndentation}${formatPython(value, level + 1)}`);
   const singleTupleComma = node.type === 'tuple' && node.values.length === 1 ? ',' : '';
@@ -323,7 +414,7 @@ export function formatStructuredText(text) {
   try {
     const value = new PythonLiteralParser(source).parse();
     return { format: 'python', text: formatPython(value) };
-  } catch {
-    throw new Error('Text is not valid JSON or a supported Python literal.');
+  } catch (error) {
+    throw new Error(`Text is not valid JSON or a supported Python literal. (${error.message})`);
   }
 }

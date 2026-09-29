@@ -66,3 +66,56 @@ test('rejects Python expressions instead of evaluating them', () => {
 test('rejects empty text', () => {
   assert.throws(() => formatStructuredText('   '), /Nothing to beautify/);
 });
+
+test('beautifies pydantic dict() output containing UUID, datetime, Decimal and enum reprs', () => {
+  const input =
+    "{'id': UUID('12345678-1234-5678-1234-567812345678'), 'created': datetime.datetime(2024, 1, 2, 3, 4, tzinfo=datetime.timezone.utc), " +
+    "'price': Decimal('1.50'), 'status': <Status.ACTIVE: 'active'>, 'tags': {'a', 'b'}, 'raw': b'\\x00ab', 'ratio': -inf, 'none': None}";
+  const result = formatStructuredText(input);
+  assert.equal(result.format, 'python');
+  assert.equal(
+    result.text,
+    `{
+  'id': UUID('12345678-1234-5678-1234-567812345678'),
+  'created': datetime.datetime(2024, 1, 2, 3, 4, tzinfo=datetime.timezone.utc),
+  'price': Decimal('1.50'),
+  'status': <Status.ACTIVE: 'active'>,
+  'tags': {
+    'a',
+    'b'
+  },
+  'raw': b'\\x00ab',
+  'ratio': -inf,
+  'none': None
+}`
+  );
+});
+
+test('beautifies a pydantic model repr with keyword arguments and nested models', () => {
+  const result = formatStructuredText(
+    "User(id=UUID('12345678-1234-5678-1234-567812345678'), address=Address(city='X', zip=None), roles=['a', 'b'], meta={})"
+  );
+  assert.equal(
+    result.text,
+    `User(
+  id=UUID('12345678-1234-5678-1234-567812345678'),
+  address=Address(city='X', zip=None),
+  roles=[
+    'a',
+    'b'
+  ],
+  meta={}
+)`
+  );
+});
+
+test('handles empty sets, ellipsis and enum reprs containing angle brackets in strings', () => {
+  const result = formatStructuredText("{'a': set(), 'b': [...], 'c': <E.X: '>'>}");
+  assert.match(result.text, /'a': set\(\)/);
+  assert.match(result.text, /\.\.\./);
+  assert.match(result.text, /'c': <E\.X: '>'>/);
+});
+
+test('still rejects operators and method calls on results', () => {
+  assert.throws(() => formatStructuredText("{'a': 1 + 2}"), /not valid JSON or a supported Python literal/);
+});

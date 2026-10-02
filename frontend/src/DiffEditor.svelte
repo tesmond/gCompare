@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
-  import { Decoration, EditorView, drawSelection, keymap, lineNumbers } from '@codemirror/view';
+  import { Decoration, EditorView, WidgetType, drawSelection, keymap, lineNumbers } from '@codemirror/view';
   import { applyLinkedScrollDelta, syncLinkedScrollPosition, wheelDeltaPixels } from './linkedScroll.js';
 
   export let leftText = '';
@@ -45,6 +45,32 @@
         style: `--gc-extra-right: ${value.right}px; --gc-extra-bottom: ${value.bottom}px`
       }))
   });
+
+  // Block spacer that stands in for lines that only exist on the other side,
+  // so matching sections stay vertically aligned (like IntelliJ/VS Code).
+  class GapWidget extends WidgetType {
+    constructor(count) {
+      super();
+      this.count = count;
+    }
+    eq(other) {
+      return other.count === this.count;
+    }
+    get estimatedHeight() {
+      return this.count * 14;
+    }
+    toDOM(view) {
+      const element = document.createElement('div');
+      element.className = 'gc-gap-widget gc-semantic-orphan_gap';
+      // Use the editor's measured line height so gaps match real lines exactly.
+      element.style.height = `${this.count * view.defaultLineHeight}px`;
+      element.setAttribute('aria-hidden', 'true');
+      return element;
+    }
+    ignoreEvent() {
+      return true;
+    }
+  }
 
   function segmentIsDiff(segment) {
     return segment?.isDiffToken ?? segment?.changed;
@@ -115,18 +141,25 @@
   }
 
   function buildDecorations(state, diffRows, side) {
-    const builder = new RangeSetBuilder();
-    const orderedRows = [...(diffRows || [])]
-      .map((row, index) => ({ row, index, lineNumber: sideLineNumber(row, side) }))
-      .filter((item) => item.lineNumber)
-      .sort((a, b) => a.lineNumber - b.lineNumber);
+    const entries = [];
+    const add = (from, to, deco) => entries.push({ from, to, deco });
+    const rowsForSide = diffRows || [];
+    let pendingGap = 0;
 
-    for (const { row, index, lineNumber } of orderedRows) {
-      if (lineNumber < 1 || lineNumber > state.doc.lines) continue;
+    rowsForSide.forEach((row, index) => {
+      const lineNumber = sideLineNumber(row, side);
+      if (!lineNumber || lineNumber < 1 || lineNumber > state.doc.lines) {
+        if (!lineNumber) pendingGap++;
+        return;
+      }
       const line = state.doc.line(lineNumber);
+      if (pendingGap > 0) {
+        add(line.from, line.from, Decoration.widget({ widget: new GapWidget(pendingGap), block: true, side: -1 }));
+        pendingGap = 0;
+      }
       const semantic = semanticState(row, side).toLowerCase();
       const selected = selectedRange && index >= selectedRange.start && index <= selectedRange.end ? ' gc-selected-line' : '';
-      builder.add(
+      add(
         line.from,
         line.from,
         Decoration.line({
@@ -140,12 +173,20 @@
         const from = offset;
         const to = Math.min(line.to, offset + length);
         if (segmentIsDiff(segment) && to > from) {
-          builder.add(from, to, Decoration.mark({ class: 'gc-diff-token' }));
+          add(from, to, Decoration.mark({ class: 'gc-diff-token' }));
         }
         offset += length;
       }
+    });
+
+    if (pendingGap > 0) {
+      const end = state.doc.length;
+      add(end, end, Decoration.widget({ widget: new GapWidget(pendingGap), block: true, side: 1 }));
     }
 
+    entries.sort((a, b) => a.from - b.from || a.deco.startSide - b.deco.startSide);
+    const builder = new RangeSetBuilder();
+    for (const { from, to, deco } of entries) builder.add(from, to, deco);
     return builder.finish();
   }
 
@@ -256,7 +297,8 @@
     if (!scroller) return;
     onViewportChange({
       scrollTop: scroller.scrollTop,
-      clientHeight: scroller.clientHeight
+      clientHeight: scroller.clientHeight,
+      scrollHeight: scroller.scrollHeight
     });
   }
 
@@ -293,8 +335,8 @@
   }
 
   function naturalHeight(view) {
-    // Document height from CodeMirror's height map; independent of padding.
-    return view.lineBlockAt(view.state.doc.length).bottom;
+    // Scrollable height (includes block gap widgets) minus our own extra padding.
+    return view.scrollDOM.scrollHeight - view.state.field(extraSpaceField).bottom;
   }
 
   function naturalWidth(view) {
@@ -319,6 +361,7 @@
       }
     });
     syncLinkedScrollPosition(scrollDOMs(), leftView.scrollDOM);
+    reportViewport(leftView.scrollDOM);
   }
 
   function scheduleEqualScrollRanges() {
@@ -379,7 +422,7 @@
     resizeObserver.observe(rightHost);
     tick().then(() => {
       if (leftView) {
-        onViewportChange({ scrollTop: leftView.scrollDOM.scrollTop, clientHeight: leftView.scrollDOM.clientHeight });
+        reportViewport(leftView.scrollDOM);
       }
       scheduleEqualScrollRanges();
     });

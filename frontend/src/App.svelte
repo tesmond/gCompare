@@ -28,6 +28,7 @@
   let diffEditor;
   let mapScrollTop = 0;
   let mapViewportHeight = 0;
+  let mapScrollHeight = 0;
   let unsubscribeFolderUpdates = null;
   let unsubscribeFileChanges = null;
   const fileRowHeight = 28;
@@ -887,6 +888,7 @@
   function updateEditorViewport(viewport) {
     mapScrollTop = viewport?.scrollTop || 0;
     mapViewportHeight = viewport?.clientHeight || 0;
+    mapScrollHeight = viewport?.scrollHeight || 0;
   }
 
   async function showEditorContext(tab, details) {
@@ -1168,6 +1170,7 @@
   function updateMapViewport(pane) {
     mapScrollTop = pane?.scrollTop || 0;
     mapViewportHeight = pane?.clientHeight || 0;
+    mapScrollHeight = pane?.scrollHeight || 0;
   }
 
   function indicator(status) {
@@ -1371,12 +1374,28 @@
     return '#FFFFFF';
   }
 
+  // Collapse consecutive rows of the same colour into proportional segments so
+  // the overview map spans the whole gutter however many rows there are.
+  function mapSegments(rows) {
+    const segments = [];
+    for (const row of rows || []) {
+      const color = mapColor(row);
+      const last = segments[segments.length - 1];
+      if (last && last.color === color) {
+        last.count++;
+      } else {
+        segments.push({ color, count: 1 });
+      }
+    }
+    return segments;
+  }
+
   function viewportWindowStyle(tab) {
     const totalRows = comparisonRows(tab).length;
-    if (!totalRows || !mapViewportHeight) return 'top: 0%; height: 100%;';
-    const visibleRows = mapViewportHeight / fileRowHeight;
-    const top = Math.min(100, (mapScrollTop / fileRowHeight / totalRows) * 100);
-    const height = Math.max(6, Math.min(100, (visibleRows / totalRows) * 100));
+    if (!mapViewportHeight) return 'top: 0%; height: 100%;';
+    const contentHeight = Math.max(mapScrollHeight, mapViewportHeight, totalRows ? 0 : 1);
+    const top = Math.min(100, (mapScrollTop / contentHeight) * 100);
+    const height = Math.max(2, Math.min(100, (mapViewportHeight / contentHeight) * 100));
     return `top: ${top}%; height: ${height}%;`;
   }
 
@@ -1915,8 +1934,8 @@
             />
           {/key}
           <div class="diff-map-gutter" aria-label="Text difference overview">
-            {#each comparisonRows(sourceTab) as row}
-              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {#each mapSegments(comparisonRows(sourceTab)) as segment}
+<div class="diff-map-pixel" style={`background: ${segment.color}; flex: ${segment.count} 1 0`}></div>
             {/each}
             <div class="diff-map-window" style={viewportWindowStyle(sourceTab)}></div>
             <div class="diff-map-focus" style={focusIndicatorStyle(sourceTab)}></div>
@@ -2106,8 +2125,8 @@
                 />
               {/key}
               <div class="diff-map-gutter" aria-label="Text difference overview">
-                {#each comparisonRows(sourceTab) as row}
-                  <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+                {#each mapSegments(comparisonRows(sourceTab)) as segment}
+<div class="diff-map-pixel" style={`background: ${segment.color}; flex: ${segment.count} 1 0`}></div>
                 {/each}
                 <div class="diff-map-window" style={viewportWindowStyle(sourceTab)}></div>
                 <div class="diff-map-focus" style={focusIndicatorStyle(sourceTab)}></div>
@@ -2215,8 +2234,8 @@
             />
           {/key}
           <div class="diff-map-gutter" aria-label="Difference overview">
-            {#each comparisonRows(activeTab) as row}
-              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {#each mapSegments(comparisonRows(activeTab)) as segment}
+<div class="diff-map-pixel" style={`background: ${segment.color}; flex: ${segment.count} 1 0`}></div>
             {/each}
             <div class="diff-map-window" style={viewportWindowStyle(activeTab)}></div>
             <div class="diff-map-focus" style={focusIndicatorStyle(activeTab)}></div>
@@ -2342,8 +2361,8 @@
             </div>
           </div>
           <div class="diff-map-gutter" aria-label="Folder difference overview">
-            {#each activeTab.result?.rows || [] as row}
-              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {#each mapSegments(activeTab.result?.rows || []) as segment}
+<div class="diff-map-pixel" style={`background: ${segment.color}; flex: ${segment.count} 1 0`}></div>
             {/each}
             <div class="diff-map-window" style={viewportWindowStyle(activeTab)}></div>
             <div class="diff-map-focus" style={focusIndicatorStyle(activeTab)}></div>
@@ -2395,8 +2414,8 @@
             />
           {/key}
           <div class="diff-map-gutter" aria-label="Difference overview">
-            {#each comparisonRows(activeTab) as row}
-              <div class="diff-map-pixel" style={`background: ${mapColor(row)}`}></div>
+            {#each mapSegments(comparisonRows(activeTab)) as segment}
+<div class="diff-map-pixel" style={`background: ${segment.color}; flex: ${segment.count} 1 0`}></div>
             {/each}
             <div class="diff-map-window" style={viewportWindowStyle(activeTab)}></div>
             <div class="diff-map-focus" style={focusIndicatorStyle(activeTab)}></div>

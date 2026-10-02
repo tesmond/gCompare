@@ -150,6 +150,14 @@ func (a *App) CopyFileRightToLeft(rightPath string, leftPath string, overwrite b
 	return compare.CopyFile(rightPath, leftPath, overwrite)
 }
 
+func (a *App) PlanCopy(src string, dst string) ([]compare.CopyItem, error) {
+	return compare.PlanCopy(src, dst)
+}
+
+func (a *App) CopyPath(src string, dst string) error {
+	return compare.CopyPath(src, dst)
+}
+
 func (a *App) RevealPath(path string) error {
 	if path == "" {
 		return fmt.Errorf("no path to reveal")

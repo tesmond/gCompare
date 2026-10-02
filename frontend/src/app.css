@@ -191,6 +191,24 @@ button:disabled {
   color: #7d1b1b;
 }
 
+.info-banner {
+  align-items: center;
+  background: #eaf3fb;
+  border-bottom: 1px solid #a9c7e3;
+  color: #17405f;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.info-banner-dismiss {
+  border: 0;
+  background: transparent;
+  min-height: 0;
+  padding: 0 6px;
+}
+
 .source-picker {
   display: grid;
   grid-template-rows: 1fr;
@@ -1458,6 +1476,41 @@ button:disabled {
 
 .dialog p {
   margin: 0 0 16px;
+}
+
+.overwrite-dialog {
+  max-width: 560px;
+}
+
+.overwrite-table {
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  width: 100%;
+}
+
+.overwrite-table th,
+.overwrite-table td {
+  border: 1px solid #dde3ea;
+  font-weight: normal;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.overwrite-table thead th,
+.overwrite-table tbody th {
+  background: #f3f6f9;
+  font-weight: 600;
+}
+
+.overwrite-newer {
+  color: #8a3b00;
+  font-weight: 600;
+}
+
+.folder-side-pane .compare-side-row,
+.folder-center-pane .compare-status-row {
+  user-select: none;
 }
 
 .dialog-actions {

@@ -12,6 +12,11 @@
   let error = '';
   let contextMenu = null;
   let contextMenuElement;
+  let copyBusy = false;
+  let copyProgress = '';
+  let copyNotice = '';
+  let overwritePrompt = null;
+  let overwriteDefaultButton;
   let pendingClose = null;
   let textCompareRequests = {};
   let fileEditTimers = {};
@@ -172,6 +177,8 @@
         loading: true,
         error: '',
         selectedRow: null,
+        selectedRows: [],
+        anchorRow: null,
         expanded: {},
         loadedFolders: {},
         loadingFolders: {}
@@ -431,6 +438,8 @@
           result,
           loading: false,
           selectedRow: null,
+          selectedRows: [],
+          anchorRow: null,
           expanded: {},
           loadedFolders: {},
           loadingFolders: {}
@@ -1270,6 +1279,14 @@
   }
 
   function clickFolderSideRow(tab, row, event) {
+    if (event.shiftKey) {
+      selectFolderRowRange(tab, row.rowIndex);
+      return;
+    }
+    if (event.metaKey || event.ctrlKey) {
+      toggleFolderRowSelection(tab, row.rowIndex);
+      return;
+    }
     selectFolderRow(tab, row.rowIndex);
     if (rowIsFolder(row)) {
       toggleFolderNode(tab, row, event);
@@ -1373,7 +1390,31 @@
   }
 
   function selectFolderRow(tab, rowIndex) {
-    updateTab(tab.id, { selectedRow: rowIndex });
+    updateTab(tab.id, { selectedRow: rowIndex, selectedRows: [rowIndex], anchorRow: rowIndex });
+  }
+
+  function toggleFolderRowSelection(tab, rowIndex) {
+    const current = tab.selectedRows || [];
+    const selected = current.includes(rowIndex);
+    const selectedRows = selected ? current.filter((index) => index !== rowIndex) : [...current, rowIndex];
+    updateTab(tab.id, {
+      selectedRow: selected ? (selectedRows[selectedRows.length - 1] ?? null) : rowIndex,
+      selectedRows,
+      anchorRow: rowIndex
+    });
+  }
+
+  function selectFolderRowRange(tab, rowIndex) {
+    const visible = visibleFolderRows(tab);
+    const anchor = tab.anchorRow ?? tab.selectedRow;
+    const from = visible.findIndex((row) => row.rowIndex === anchor);
+    const to = visible.findIndex((row) => row.rowIndex === rowIndex);
+    if (from < 0 || to < 0) {
+      selectFolderRow(tab, rowIndex);
+      return;
+    }
+    const selectedRows = visible.slice(Math.min(from, to), Math.max(from, to) + 1).map((row) => row.rowIndex);
+    updateTab(tab.id, { selectedRow: rowIndex, selectedRows, anchorRow: anchor });
   }
 
   function entryIsFile(type) {
@@ -1395,11 +1436,186 @@
     await openFileComparison({ left: row.leftPath, right: row.rightPath });
   }
 
+  function entryIsCopyable(type) {
+    return ['file', 'folder', 'symlink'].includes(String(type || '').trim().toLowerCase());
+  }
+
   function canCopyFolderFile(row, direction) {
-    if (direction === 'ltr') {
-      return entryIsFile(row.leftType) && (!row.rightExists || entryIsFile(row.rightType)) && row.leftPath && row.rightPath;
+    if (!row?.leftPath || !row?.rightPath) return false;
+    return direction === 'ltr'
+      ? Boolean(row.leftExists && entryIsCopyable(row.leftType))
+      : Boolean(row.rightExists && entryIsCopyable(row.rightType));
+  }
+
+  // The rows a copy applies to: the highlighted rows when the clicked row is one of them, otherwise just the
+  // clicked row. Rows inside a highlighted folder are left out because copying the folder already covers them.
+  function copyRowsFor(tab, direction, clickedRow) {
+    if (!tab || tab.mode !== 'folder' || !clickedRow) return [];
+    const visible = visibleFolderRows(tab);
+    const selected = new Set(tab.selectedRows || []);
+    let picked = visible.filter((row) => selected.has(row.rowIndex));
+    if (!picked.some((row) => row.id === clickedRow.id)) picked = [clickedRow];
+    picked = picked.filter((row) => canCopyFolderFile(row, direction));
+    const sourceSide = direction === 'ltr' ? 'left' : 'right';
+    const pickedFolders = new Set(picked.filter((row) => sideIsFolder(row, sourceSide)).map((row) => row.id));
+    const byID = new Map(comparisonRows(tab).map((row) => [row.id, row]));
+    return picked.filter((row) => {
+      let parentID = row.parentID;
+      while (parentID) {
+        if (pickedFolders.has(parentID)) return false;
+        parentID = byID.get(parentID)?.parentID;
+      }
+      return true;
+    });
+  }
+
+  function copyMenuLabel(tab, direction, clickedRow) {
+    const count = copyRowsFor(tab, direction, clickedRow).length;
+    const target = direction === 'ltr' ? 'right' : 'left';
+    return count > 1 ? `Copy ${count} items to ${target}` : `Copy to ${target}`;
+  }
+
+  function formatCopySize(bytes) {
+    if (bytes === null || bytes === undefined) return '';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
     }
-    return entryIsFile(row.rightType) && (!row.leftExists || entryIsFile(row.leftType)) && row.leftPath && row.rightPath;
+    const text = unit === 0 ? `${value} B` : `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unit]}`;
+    return unit === 0 ? text : `${text} (${bytes.toLocaleString()} bytes)`;
+  }
+
+  function formatCopyDate(ms) {
+    return new Date(ms).toLocaleString();
+  }
+
+  function askOverwrite(item, direction, multiple) {
+    return new Promise((resolve) => {
+      overwritePrompt = { item, direction, multiple, resolve };
+      tick().then(() => overwriteDefaultButton?.focus());
+    });
+  }
+
+  function answerOverwrite(choice) {
+    const prompt = overwritePrompt;
+    overwritePrompt = null;
+    prompt?.resolve(choice);
+  }
+
+  async function refreshFolderKeepingState(tabID) {
+    const tab = getTab(tabID);
+    if (!tab || tab.mode !== 'folder') return;
+    const api = backend();
+    const rows = comparisonRows(tab);
+    const expandedIDs = rows.filter((row) => tab.expanded?.[row.id] && tab.loadedFolders?.[row.id]).map((row) => row.id);
+    const selectedIDs = new Set(rows.filter((row) => (tab.selectedRows || []).includes(row.rowIndex)).map((row) => row.id));
+
+    let result = await api.RefreshFolderComparison(tab.id, tab.leftPath, tab.rightPath);
+    const expanded = {};
+    const loadedFolders = {};
+    for (const id of expandedIDs) {
+      if (!result.rows.some((row) => row.id === id && rowIsFolder(row))) continue;
+      try {
+        result = await api.ExpandFolderComparisonNode(tab.id, id);
+        expanded[id] = true;
+        loadedFolders[id] = true;
+      } catch (err) {
+        // The folder is gone; leave it collapsed.
+      }
+    }
+    const selectedRows = result.rows.filter((row) => selectedIDs.has(row.id)).map((row) => row.rowIndex);
+    updateTab(tab.id, {
+      result,
+      loading: false,
+      error: '',
+      expanded,
+      loadedFolders,
+      loadingFolders: {},
+      selectedRows,
+      selectedRow: selectedRows.length ? selectedRows[selectedRows.length - 1] : null,
+      anchorRow: selectedRows.length ? selectedRows[0] : null
+    });
+  }
+
+  async function copySelection(direction) {
+    if (!contextMenu || copyBusy) return;
+    const tab = getTab(contextMenu.tabID);
+    const rows = copyRowsFor(tab, direction, contextMenu.row);
+    hideContext();
+    if (!tab || !rows.length) return;
+
+    const toRight = direction === 'ltr';
+    const multiple = rows.length > 1 || rows.some((row) => sideIsFolder(row, toRight ? 'left' : 'right'));
+    const summary = { copied: 0, skipped: 0, failed: [], cancelled: false };
+    copyBusy = true;
+    copyNotice = '';
+    error = '';
+    try {
+      const api = backend();
+      copyProgress = 'Checking files…';
+      const items = [];
+      for (const row of rows) {
+        const planned = await api.PlanCopy(toRight ? row.leftPath : row.rightPath, toRight ? row.rightPath : row.leftPath);
+        items.push(...(planned || []));
+      }
+
+      let overwriteAll = false;
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        copyProgress = `Copying ${index + 1} of ${items.length}…`;
+        if (item.action === 'error') {
+          summary.failed.push(`${item.name}: ${item.reason}`);
+          continue;
+        }
+        if (item.action === 'skip') {
+          summary.skipped += 1;
+          continue;
+        }
+        if (item.action === 'confirm' && !overwriteAll) {
+          const choice = await askOverwrite(item, direction, multiple);
+          if (choice === 'cancel') {
+            summary.cancelled = true;
+            break;
+          }
+          if (choice === 'no') {
+            summary.skipped += 1;
+            continue;
+          }
+          if (choice === 'all') overwriteAll = true;
+        }
+        try {
+          await api.CopyPath(item.source, item.dest);
+          if (item.type !== 'folder') summary.copied += 1;
+        } catch (err) {
+          summary.failed.push(`${item.name}: ${err?.message || String(err)}`);
+        }
+      }
+    } catch (err) {
+      summary.failed.push(err?.message || String(err));
+    } finally {
+      copyProgress = '';
+    }
+
+    try {
+      await refreshFolderKeepingState(tab.id);
+    } catch (err) {
+      summary.failed.push(err?.message || String(err));
+    }
+    copyBusy = false;
+
+    const noun = (count) => (count === 1 ? 'file' : 'files');
+    const parts = [`Copied ${summary.copied} ${noun(summary.copied)} to the ${toRight ? 'right' : 'left'}`];
+    if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+    if (summary.cancelled) parts.push('cancelled');
+    copyNotice = parts.join(', ');
+    if (summary.failed.length) {
+      const shown = summary.failed.slice(0, 3).join('; ');
+      const more = summary.failed.length > 3 ? ` (and ${summary.failed.length - 3} more)` : '';
+      error = `${summary.failed.length} item(s) could not be copied: ${shown}${more}`;
+    }
   }
 
   function canRevealFolderSide(row, side) {
@@ -1466,7 +1682,7 @@
   }
 
   function rowSelected(tab, index) {
-    if (tab.mode === 'folder') return tab.selectedRow === index;
+    if (tab.mode === 'folder') return tab.selectedRows ? tab.selectedRows.includes(index) : tab.selectedRow === index;
     const range = selectedFileRange(tab);
     return range && index >= range.start && index <= range.end;
   }
@@ -1492,7 +1708,8 @@
       rowIndex
     };
     if (tab.mode === 'folder') {
-      selectFolderRow(tab, rowIndex);
+      // Right-clicking inside the current selection keeps it, so the menu acts on every highlighted row.
+      if (!rowSelected(tab, rowIndex)) selectFolderRow(tab, rowIndex);
     } else {
       selectFileRow(tab, rowIndex, event);
     }
@@ -1522,27 +1739,6 @@
 
   function hideContext() {
     contextMenu = null;
-  }
-
-  async function copyFolder(direction) {
-    if (!contextMenu) return;
-    const tab = tabs.find((item) => item.id === contextMenu.tabID);
-    const row = contextMenu.row;
-    hideContext();
-    if (!tab || !row) return;
-    const overwrite = direction === 'ltr' ? row.rightExists : row.leftExists;
-    if (overwrite && !confirm('Overwrite the destination file?')) return;
-    try {
-      if (direction === 'ltr') {
-        await backend().CopyFileLeftToRight(row.leftPath, row.rightPath, overwrite);
-      } else {
-        await backend().CopyFileRightToLeft(row.rightPath, row.leftPath, overwrite);
-      }
-      activeTabID = tab.id;
-      await refreshActive();
-    } catch (err) {
-      failActive(err);
-    }
   }
 
   async function copyLines(direction) {
@@ -1607,7 +1803,13 @@
   createSourceTab();
 </script>
 
-<svelte:window on:beforeunload={preventDirtyExit} on:click={hideContext} />
+<svelte:window
+  on:beforeunload={preventDirtyExit}
+  on:click={hideContext}
+  on:keydown={(event) => {
+    if (event.key === 'Escape' && overwritePrompt) answerOverwrite(overwritePrompt.multiple ? 'cancel' : 'no');
+  }}
+/>
 
 <main class="app-shell">
   <div class="tab-bar" aria-label="Open tabs" role="tablist">
@@ -1626,6 +1828,14 @@
 
   {#if error}
     <div class="error-banner">{error}</div>
+  {/if}
+  {#if copyProgress}
+    <div class="info-banner">{copyProgress}</div>
+  {:else if copyNotice}
+    <div class="info-banner">
+      <span>{copyNotice}</span>
+      <button class="info-banner-dismiss" aria-label="Dismiss" on:click={() => (copyNotice = '')}>×</button>
+    </div>
   {/if}
 
   {#if !activeTab}
@@ -2209,11 +2419,11 @@
         {#if rowIsFolder(contextMenu.row)}
           <button disabled={folderComparisonRunning(getTab(contextMenu.tabID))} on:click={refreshContextFolder}>Refresh this folder</button>
         {/if}
-        {#if canCopyFolderFile(contextMenu.row, 'ltr')}
-          <button on:click={() => copyFolder('ltr')}>Copy left to right</button>
+        {#if contextMenu.side !== 'right' && copyRowsFor(getTab(contextMenu.tabID), 'ltr', contextMenu.row).length}
+          <button disabled={copyBusy} on:click={() => copySelection('ltr')}>{copyMenuLabel(getTab(contextMenu.tabID), 'ltr', contextMenu.row)}</button>
         {/if}
-        {#if canCopyFolderFile(contextMenu.row, 'rtl')}
-          <button on:click={() => copyFolder('rtl')}>Copy right to left</button>
+        {#if contextMenu.side !== 'left' && copyRowsFor(getTab(contextMenu.tabID), 'rtl', contextMenu.row).length}
+          <button disabled={copyBusy} on:click={() => copySelection('rtl')}>{copyMenuLabel(getTab(contextMenu.tabID), 'rtl', contextMenu.row)}</button>
         {/if}
         {#if canOpenFolderFile(contextMenu.row)}
           <button on:click={() => openFolderFile(contextMenu.row)}>Compare files</button>
@@ -2237,6 +2447,55 @@
         <button on:click={() => reveal(activeTab.leftPath)}>Show left file in folder</button>
         <button on:click={() => reveal(activeTab.rightPath)}>Show right file in folder</button>
       {/if}
+    </div>
+  {/if}
+
+  {#if overwritePrompt}
+    <div class="dialog-backdrop">
+      <div class="dialog overwrite-dialog" role="alertdialog" aria-labelledby="overwrite-title">
+        <h2 id="overwrite-title">{overwritePrompt.item.reason === 'same_time' ? 'Overwrite different file?' : 'Overwrite newer file?'}</h2>
+        <p>
+          {#if overwritePrompt.item.reason === 'same_time'}
+            <strong>{overwritePrompt.item.name}</strong> already exists with the same modified time but different contents.
+          {:else}
+            <strong>{overwritePrompt.item.name}</strong> already exists and is newer than the file you are copying.
+          {/if}
+          Do you want to overwrite it?
+        </p>
+        <table class="overwrite-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Copying from the {overwritePrompt.direction === 'ltr' ? 'left' : 'right'}</th>
+              <th>Replacing on the {overwritePrompt.direction === 'ltr' ? 'right' : 'left'}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>Modified</th>
+              <td>{formatCopyDate(overwritePrompt.item.sourceModified)}</td>
+              <td class:overwrite-newer={overwritePrompt.item.destModified > overwritePrompt.item.sourceModified}>
+                {formatCopyDate(overwritePrompt.item.destModified)}
+              </td>
+            </tr>
+            <tr>
+              <th>Size</th>
+              <td>{formatCopySize(overwritePrompt.item.sourceSize)}</td>
+              <td>{formatCopySize(overwritePrompt.item.destSize)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="dialog-actions">
+          <button on:click={() => answerOverwrite('yes')}>Yes</button>
+          {#if overwritePrompt.multiple}
+            <button on:click={() => answerOverwrite('all')}>Yes to all</button>
+          {/if}
+          <button bind:this={overwriteDefaultButton} class="primary" on:click={() => answerOverwrite('no')}>No</button>
+          {#if overwritePrompt.multiple}
+            <button on:click={() => answerOverwrite('cancel')}>Cancel</button>
+          {/if}
+        </div>
+      </div>
     </div>
   {/if}
 

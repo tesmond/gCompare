@@ -16,6 +16,38 @@ export namespace compare {
 	        this.type = source["type"];
 	    }
 	}
+	export class CopyItem {
+	    source: string;
+	    dest: string;
+	    name: string;
+	    type: string;
+	    action: string;
+	    reason?: string;
+	    sourceSize: number;
+	    sourceModified: number;
+	    destExists: boolean;
+	    destSize: number;
+	    destModified: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CopyItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source = source["source"];
+	        this.dest = source["dest"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.action = source["action"];
+	        this.reason = source["reason"];
+	        this.sourceSize = source["sourceSize"];
+	        this.sourceModified = source["sourceModified"];
+	        this.destExists = source["destExists"];
+	        this.destSize = source["destSize"];
+	        this.destModified = source["destModified"];
+	    }
+	}
 	export class DirectoryListing {
 	    path: string;
 	    parent: string;
@@ -30,68 +62,6 @@ export namespace compare {
 	        this.path = source["path"];
 	        this.parent = source["parent"];
 	        this.entries = this.convertValues(source["entries"], BrowserEntry);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class GitRevision {
-	    kind: string;
-	    hash: string;
-	    shortHash: string;
-	    path: string;
-	    date: string;
-	    author: string;
-	    subject: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new GitRevision(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.kind = source["kind"];
-	        this.hash = source["hash"];
-	        this.shortHash = source["shortHash"];
-	        this.path = source["path"];
-	        this.date = source["date"];
-	        this.author = source["author"];
-	        this.subject = source["subject"];
-	    }
-	}
-	export class GitFileHistory {
-	    path: string;
-	    repoRoot: string;
-	    relativePath: string;
-	    branch: string;
-	    revisions: GitRevision[];
-	
-	    static createFrom(source: any = {}) {
-	        return new GitFileHistory(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.path = source["path"];
-	        this.repoRoot = source["repoRoot"];
-	        this.relativePath = source["relativePath"];
-	        this.branch = source["branch"];
-	        this.revisions = this.convertValues(source["revisions"], GitRevision);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -303,6 +273,69 @@ export namespace compare {
 	        this.rightRoot = source["rightRoot"];
 	        this.revision = source["revision"];
 	        this.rows = this.convertValues(source["rows"], FolderComparisonRow);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class GitRevision {
+	    kind: string;
+	    hash: string;
+	    shortHash: string;
+	    path: string;
+	    date: string;
+	    author: string;
+	    subject: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GitRevision(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.hash = source["hash"];
+	        this.shortHash = source["shortHash"];
+	        this.path = source["path"];
+	        this.date = source["date"];
+	        this.author = source["author"];
+	        this.subject = source["subject"];
+	    }
+	}
+	export class GitFileHistory {
+	    path: string;
+	    repoRoot: string;
+	    relativePath: string;
+	    branch: string;
+	    revisions: GitRevision[];
+	
+	    static createFrom(source: any = {}) {
+	        return new GitFileHistory(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.repoRoot = source["repoRoot"];
+	        this.relativePath = source["relativePath"];
+	        this.branch = source["branch"];
+	        this.revisions = this.convertValues(source["revisions"], GitRevision);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

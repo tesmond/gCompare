@@ -961,9 +961,14 @@ func CopyFile(src string, dst string, overwrite bool) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("source is not a regular file: %s", src)
 	}
-	if _, err := os.Stat(dst); err == nil && !overwrite {
-		return fmt.Errorf("destination exists: %s", dst)
-	} else if err != nil && !os.IsNotExist(err) {
+	if dstInfo, err := os.Stat(dst); err == nil {
+		if os.SameFile(info, dstInfo) {
+			return fmt.Errorf("source and destination are the same file: %s", src)
+		}
+		if !overwrite {
+			return fmt.Errorf("destination exists: %s", dst)
+		}
+	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("destination file: %w", err)
 	}
 
@@ -988,5 +993,10 @@ func CopyFile(src string, dst string, overwrite bool) error {
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close destination: %w", err)
 	}
-	return os.Chmod(dst, info.Mode().Perm())
+	if err := os.Chmod(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	// Keep the source's modification time so the copy still compares as
+	// "same date" instead of looking newer than the file it came from.
+	return os.Chtimes(dst, info.ModTime(), info.ModTime())
 }

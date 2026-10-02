@@ -46,6 +46,10 @@ export function CopyFileRightToLeft(arg1, arg2, arg3) {
   return window['go']['main']['App']['CopyFileRightToLeft'](arg1, arg2, arg3);
 }
 
+export function CopyPath(arg1, arg2) {
+  return window['go']['main']['App']['CopyPath'](arg1, arg2);
+}
+
 export function DiscardFileChanges(arg1) {
   return window['go']['main']['App']['DiscardFileChanges'](arg1);
 }
@@ -72,6 +76,10 @@ export function OpenFileComparison(arg1, arg2, arg3) {
 
 export function OpenFolderComparison(arg1, arg2, arg3) {
   return window['go']['main']['App']['OpenFolderComparison'](arg1, arg2, arg3);
+}
+
+export function PlanCopy(arg1, arg2) {
+  return window['go']['main']['App']['PlanCopy'](arg1, arg2);
 }
 
 export function PreviewFile(arg1) {

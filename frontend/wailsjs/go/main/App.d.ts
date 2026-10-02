@@ -24,6 +24,8 @@ export function CopyFileLeftToRight(arg1:string,arg2:string,arg3:boolean):Promis
 
 export function CopyFileRightToLeft(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
+export function CopyPath(arg1:string,arg2:string):Promise<void>;
+
 export function DiscardFileChanges(arg1:string):Promise<compare.FileComparisonResult>;
 
 export function ExpandFolderComparisonNode(arg1:string,arg2:string):Promise<compare.FolderComparisonResult>;
@@ -37,6 +39,8 @@ export function ListDirectory(arg1:string):Promise<compare.DirectoryListing>;
 export function OpenFileComparison(arg1:string,arg2:string,arg3:string):Promise<compare.FileComparisonResult>;
 
 export function OpenFolderComparison(arg1:string,arg2:string,arg3:string):Promise<compare.FolderComparisonResult>;
+
+export function PlanCopy(arg1:string,arg2:string):Promise<Array<compare.CopyItem>>;
 
 export function PreviewFile(arg1:string):Promise<compare.FilePreview>;
 
